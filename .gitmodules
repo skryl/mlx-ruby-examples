@@ -1,3 +1,6 @@
 [submodule "mlx-examples"]
 	path = mlx-examples
 	url = https://github.com/ml-explore/mlx-examples
+[submodule "mlx-ruby"]
+	path = mlx-ruby
+	url = https://github.com/skryl/mlx-ruby
