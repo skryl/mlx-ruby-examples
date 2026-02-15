@@ -34,6 +34,15 @@ ruby gcn/main.rb --real --data-root gcn/data --epochs 100
 
 The first real run prepares `gcn/data/cora_processed.npz`.
 
+## DSL Notes
+
+- Training/validation orchestration in `main.rb` is DSL-first (`MLX::DSL::Trainer` + split plans/dataflow profiles).
+- Best-checkpoint behavior is managed by DSL artifact policy (no manual best-metric loop).
+- Optional artifact/resume flags:
+  - `--run-bundle PATH`
+  - `--resume-from SOURCE`
+  - `--best-ckpt PATH`
+
 ## Test
 
 ```bash

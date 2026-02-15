@@ -41,6 +41,7 @@ if $PROGRAM_NAME == __FILE__
     mlp_dim: 64,
     emb_dropout: 0.0
   )
+  raise "KWT missing DSL trainer helper" unless model.respond_to?(:trainer)
   x = MLX::Core.normal([4, 98, 40, 1])
   y = model.call(x)
   MLX::Core.eval(y)

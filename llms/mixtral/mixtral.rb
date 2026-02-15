@@ -6,8 +6,6 @@ require "optparse"
 require "pathname"
 
 ROOT = File.expand_path("../..", __dir__)
-DSL_LIB = File.join(ROOT, "codex-dsl", "lib")
-$LOAD_PATH.unshift(DSL_LIB) unless $LOAD_PATH.include?(DSL_LIB)
 
 require "mlx"
 

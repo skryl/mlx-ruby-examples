@@ -5,6 +5,19 @@ require "optparse"
 require_relative "image_processor"
 require_relative "model"
 
+module ClipExample
+  class LinearProbeHead < MLX::DSL::Model
+    option :in_dim
+    option :out_dim
+
+    layer :classifier, MLX::NN::Linear, -> { in_dim }, -> { out_dim }
+
+    def call(x)
+      classifier.call(x)
+    end
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   options = {
     samples: 256,
@@ -38,7 +51,7 @@ if $PROGRAM_NAME == __FILE__
     image_size: options[:image_size],
     patch_size: 8
   )
-  linear = MLX::NN::Linear.new(64, options[:classes])
+  linear = ClipExample::LinearProbeHead.new(in_dim: 64, out_dim: options[:classes])
   optimizer = MLX::Optimizers::Adam.new(learning_rate: options[:lr])
 
   labels = MLX::Core.array(
@@ -60,29 +73,36 @@ if $PROGRAM_NAME == __FILE__
   features = clip_model.encode_image(images)
   MLX::Core.eval(features)
 
-  loss_and_grad = MLX::NN.value_and_grad(
-    linear,
-    lambda do |x, y|
-      logits = linear.call(x)
-      MLX::Core.mean(MLX::NN::Losses.cross_entropy(logits, y))
-    end
-  )
-
-  options[:epochs].times do |epoch|
-    order = (0...options[:samples]).to_a.shuffle
-    losses = []
-    order.each_slice(options[:batch_size]) do |idxs|
-      ids = MLX::Core.array(idxs, MLX::Core.int32)
-      x = MLX::Core.take(features, ids, 0)
-      y = MLX::Core.take(labels, ids, 0)
-      loss, grads = loss_and_grad.call(x, y)
-      optimizer.update(linear, grads)
-      MLX::Core.eval(loss, linear.parameters, optimizer.state)
-      losses << loss.item.to_f
-    end
-    avg = losses.sum / [losses.length, 1].max.to_f
-    puts format("Epoch %d: loss %.4f", epoch, avg)
+  trainer = linear.trainer(optimizer: optimizer) do |x:, y:|
+    logits = linear.call(x)
+    MLX::Core.mean(MLX::NN::Losses.cross_entropy(logits, y))
   end
+
+  trainer.after_epoch do |ctx|
+    puts format("Epoch %d: loss %.4f", ctx.fetch(:epoch), ctx.fetch(:epoch_loss).to_f)
+  end
+
+  train_data = lambda do |epoch:, **_kwargs|
+    MLX::DSL::Data
+      .from(0...options[:samples])
+      .shuffle(seed: options[:seed] + epoch.to_i)
+      .batch(options[:batch_size])
+      .map do |batch_ids|
+        ids = MLX::Core.array(batch_ids, MLX::Core.int32)
+        x = MLX::Core.take(features, ids, 0)
+        y = MLX::Core.take(labels, ids, 0)
+        [x, y]
+      end
+  end
+
+  trainer.fit_report(
+    train_data,
+    epochs: options[:epochs],
+    collate: :xy,
+    reduce: :mean,
+    keep_losses: false,
+    strict_data_reuse: true
+  )
 
   logits = linear.call(features)
   preds = MLX::Core.argmax(logits, 1)

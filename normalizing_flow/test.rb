@@ -36,6 +36,7 @@ if $PROGRAM_NAME == __FILE__
   raise "Affine inverse mismatch: #{max_err.item}" if max_err.item > 1e-4
 
   model = NormalizingFlowExample::RealNVP.new(4, 2, 32, 2)
+  raise "RealNVP missing DSL trainer helper" unless model.respond_to?(:trainer)
   batch = MLX::Core.random_uniform([16, 2], -2.0, 2.0, MLX::Core.float32)
   log_density = model.log_prob(batch)
   MLX::Core.eval(log_density)

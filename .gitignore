@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+
+# Model weights and checkpoints
+**/weights/
+**/weights.npz
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx

@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
 
@@ -18,6 +16,8 @@ module GcnExample
   end
 
   class GCN < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     def initialize(x_dim:, h_dim:, out_dim:, nb_layers: 2, dropout: 0.5, bias: true)
       super()
       layer_sizes = [x_dim] + Array.new(nb_layers, h_dim) + [out_dim]

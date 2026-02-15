@@ -5,8 +5,6 @@ require "open3"
 require "pathname"
 
 # Ensure local DSL extensions are on the load path when running from repository root.
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
 

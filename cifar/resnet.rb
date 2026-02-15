@@ -2,8 +2,6 @@
 
 require "pathname"
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
 
@@ -62,6 +60,8 @@ module CifarExample
   end
 
   class ResNet < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     def initialize(block_class, num_blocks, num_classes: 10)
       super()
       self.conv1 = MLX::NN::Conv2d.new(3, 16, 3, stride: 1, padding: 1, bias: false)

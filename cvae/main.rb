@@ -161,24 +161,37 @@ module CvaeExample
       puts format("Number of trainable params: %.4f M", num_params / 1e6)
 
       optimizer = MLX::Optimizers::AdamW.new(learning_rate: options[:lr])
-      loss_and_grad_fn = MLX::NN.value_and_grad(model, ->(x) { loss_fn(model, x) })
+      trainer = model.trainer(optimizer: optimizer) do |image:|
+        loss_fn(model, image)
+      end
+      trainer.artifact_policy(
+        checkpoint: {
+          path: save_dir.join("checkpoints", "epoch-%{next_epoch}.npz").to_s,
+          strategy: :latest,
+          every: 1
+        },
+        retention: { keep_last_n: options.fetch(:keep_last_n, 2) }
+      )
 
       train_batch = train_iter.first
       test_batch = test_iter.first
 
-      (1..options[:epochs]).each do |epoch|
-        train_iter.reset
-        model.train(true)
-        tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        avg_loss, avg_throughput = train_epoch(model, train_iter, loss_and_grad_fn, optimizer, epoch: epoch)
-        toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      epoch_started_at = {}
+      trainer.before_epoch do |ctx|
+        epoch_started_at[ctx.fetch(:epoch)] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+      trainer.after_epoch do |ctx|
+        epoch = ctx.fetch(:epoch).to_i + 1
+        started_at = epoch_started_at.fetch(ctx.fetch(:epoch), Process.clock_gettime(Process::CLOCK_MONOTONIC))
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+        approx_throughput = (options[:batch_size] * train_iter.size) / [elapsed, 1e-9].max
 
         puts format(
           "Epoch %4d | Loss %10.2f | Throughput %8.2f im/s | Time %8.2f (s)",
           epoch,
-          avg_loss,
-          avg_throughput,
-          toc - tic
+          ctx.fetch(:epoch_loss).to_f,
+          approx_throughput,
+          elapsed
         )
 
         model.eval
@@ -188,7 +201,23 @@ module CvaeExample
           generate(model, save_dir.join(format("generated_%03d.pgm", epoch)))
         end
         model.save_weights(save_dir.join("weights.npz").to_s)
+        model.train(true)
       end
+
+      train_source = lambda do |epoch:, **_kwargs|
+        _ = epoch
+        train_iter.reset
+        train_iter
+      end
+
+      trainer.fit_report(
+        train_source,
+        epochs: options[:epochs],
+        monitor: :epoch_loss,
+        monitor_mode: :min,
+        keep_losses: false,
+        strict_data_reuse: true
+      )
 
       model
     end

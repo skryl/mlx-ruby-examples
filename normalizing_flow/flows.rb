@@ -4,11 +4,21 @@ require_relative "bijectors"
 require_relative "distributions"
 
 module NormalizingFlowExample
-  class MLP < MLX::NN::Module
-    def initialize(n_layers, d_in, d_hidden, d_out)
-      super()
+  class MLP < MLX::DSL::Model
+    option :n_layers
+    option :d_in
+    option :d_hidden
+    option :d_out
+
+    layer :network do
       layer_sizes = [d_in] + Array.new(n_layers, d_hidden) + [d_out]
-      self.layers = layer_sizes.each_cons(2).map { |idim, odim| MLX::NN::Linear.new(idim, odim) }
+      MLX::NN::Sequential.new(
+        *layer_sizes.each_cons(2).map { |idim, odim| MLX::NN::Linear.new(idim, odim) }
+      )
+    end
+
+    def layers
+      network.layers
     end
 
     def call(x)
@@ -21,6 +31,8 @@ module NormalizingFlowExample
   end
 
   class RealNVP < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     def initialize(n_transforms, d_params, d_hidden, n_layers)
       super()
       @mask_list = Array.new(n_transforms) do |i|
@@ -28,7 +40,12 @@ module NormalizingFlowExample
         MLX::Core.array(mask, MLX::Core.bool_)
       end
       self.conditioner_list = Array.new(n_transforms) do
-        MLP.new(n_layers, d_params, d_hidden, 2 * d_params)
+        MLP.new(
+          n_layers: n_layers,
+          d_in: d_params,
+          d_hidden: d_hidden,
+          d_out: 2 * d_params
+        )
       end
       @base_dist = Normal.new(
         MLX::Core.zeros([d_params]),

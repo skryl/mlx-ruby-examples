@@ -57,3 +57,7 @@ ruby lora/fuse.rb \
 ```bash
 ruby lora/test.rb
 ```
+
+## DSL Notes
+
+- Batch assembly in `lora.rb` now uses `MLX::DSL::Data` pipeline batching for cleaner iterator ergonomics.

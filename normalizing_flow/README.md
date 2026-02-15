@@ -28,6 +28,11 @@ This writes sampled arrays to `normalizing_flow/samples.npz` with keys:
 - `transform_0` ... `transform_N` for intermediate transformed samples.
 - `original` for the training two-moons data.
 
+## DSL Notes
+
+- `main.rb` uses DSL trainer + data pipelines (split plans/dataflow profiles) while preserving the original RealNVP objective.
+- `flows.rb` model declarations now use `MLX::DSL::Model` macros for conditioner construction ergonomics.
+
 ## Test
 
 ```bash

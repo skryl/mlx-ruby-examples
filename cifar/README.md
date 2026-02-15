@@ -51,6 +51,11 @@ To run on CPU:
 ruby cifar/main.rb --cpu --synthetic --epochs 1
 ```
 
+## DSL Notes
+
+- Single-device training in `main.rb` now uses DSL trainer/split-plan orchestration.
+- Multi-process distributed training keeps the explicit loop to preserve gradient-allreduce behavior.
+
 ## Test
 
 ```bash

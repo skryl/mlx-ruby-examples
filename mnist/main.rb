@@ -6,11 +6,21 @@ require "time"
 require_relative "mnist"
 
 module MnistExample
-  class MLP < MLX::NN::Module
-    def initialize(num_layers:, input_dim:, hidden_dim:, output_dim:)
-      super()
+  class MLP < MLX::DSL::Model
+    option :num_layers
+    option :input_dim
+    option :hidden_dim
+    option :output_dim
+
+    layer :network do
       layer_sizes = [input_dim] + Array.new(num_layers, hidden_dim) + [output_dim]
-      self.layers = layer_sizes.each_cons(2).map { |in_dim, out_dim| MLX::NN::Linear.new(in_dim, out_dim) }
+      MLX::NN::Sequential.new(
+        *layer_sizes.each_cons(2).map { |in_dim, out_dim| MLX::NN::Linear.new(in_dim, out_dim) }
+      )
+    end
+
+    def layers
+      network.layers
     end
 
     def call(x)
@@ -70,6 +80,20 @@ module MnistExample
       total_loss / [steps, 1].max.to_f
     end
 
+    def train_data_pipeline(x, y, batch_size:, seed:)
+      MLX::DSL::Data
+        .from(0...y.shape[0])
+        .shuffle(seed: seed)
+        .batch(batch_size)
+        .map do |batch_ids|
+          ids = MLX::Core.array(batch_ids, MLX::Core.int32)
+          [
+            MLX::Core.take(x, ids, 0),
+            MLX::Core.take(y, ids, 0)
+          ]
+        end
+    end
+
     def run(options)
       unless DATASETS.include?(options[:dataset])
         raise ArgumentError, "--dataset must be one of #{DATASETS.join(', ')}"
@@ -77,7 +101,6 @@ module MnistExample
 
       MLX::Core.set_default_device(MLX::Core.cpu) if options[:cpu]
       MLX::Core.random_seed(options[:seed])
-      rng = Random.new(options[:seed])
 
       train_images, train_labels, test_images, test_labels = Dataset.public_send(
         options[:dataset],
@@ -96,30 +119,73 @@ module MnistExample
         output_dim: 10
       )
       optimizer = MLX::Optimizers::SGD.new(learning_rate: options[:learning_rate])
-      loss_and_grad_fn = MLX::NN.value_and_grad(model, ->(x, y) { loss_fn(model, x, y) })
+      trainer = model.trainer(optimizer: optimizer) do |x:, y:|
+        loss_fn(model, x, y)
+      end
 
-      options[:epochs].times do |epoch|
-        tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        train_loss = train_epoch(
-          model,
-          train_images,
-          train_labels,
-          batch_size: options[:batch_size],
-          loss_and_grad_fn: loss_and_grad_fn,
-          optimizer: optimizer,
-          rng: rng
-        )
+      epoch_started_at = {}
+      trainer.before_epoch do |ctx|
+        epoch_started_at[ctx.fetch(:epoch)] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+      trainer.after_epoch do |ctx|
+        epoch = ctx.fetch(:epoch)
+        started_at = epoch_started_at.fetch(epoch, Process.clock_gettime(Process::CLOCK_MONOTONIC))
         test_acc = accuracy(model, test_images, test_labels)
-        toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-
         puts format(
           "Epoch %d: Train loss %.4f | Test accuracy %.3f | Time %.3f (s)",
           epoch,
-          train_loss,
+          ctx.fetch(:epoch_loss).to_f,
           test_acc,
-          toc - tic
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
         )
       end
+
+      train_data = lambda do |epoch:, **_kwargs|
+        train_data_pipeline(
+          train_images,
+          train_labels,
+          batch_size: options[:batch_size],
+          seed: options[:seed] + epoch.to_i
+        )
+      end
+      trainer.register_dataflow(
+        :mnist_train,
+        train: {
+          collate: :xy,
+          reduce: :mean
+        }
+      )
+      split_plan = MLX::DSL.splits do
+        train(train_data)
+      end
+
+      run_bundle_path = options[:run_bundle_path]
+      resume_source = options[:resume_from]
+      artifact_kwargs = {}
+      artifact_kwargs[:resume] = resume_source unless resume_source.nil? || resume_source.empty?
+      unless run_bundle_path.nil? || run_bundle_path.empty?
+        artifact_kwargs[:run_bundle] = {
+          enabled: true,
+          path: run_bundle_path,
+          config: {
+            "example" => "mnist",
+            "dataset" => options[:dataset]
+          }
+        }
+      end
+      trainer.artifact_policy(**artifact_kwargs) unless artifact_kwargs.empty?
+
+      exp = MLX::DSL.experiment("mnist") do
+        trainer(trainer)
+        data(
+          train: split_plan,
+          **trainer.use_dataflow(:mnist_train),
+          epochs: options[:epochs],
+          keep_losses: false,
+          strict_data_reuse: true
+        )
+      end
+      exp.report
 
       model
     end
@@ -138,6 +204,8 @@ if $PROGRAM_NAME == __FILE__
     seed: 0,
     data_root: "/tmp",
     python_bin: ENV.fetch("PYTHON_BIN", "python3"),
+    run_bundle_path: nil,
+    resume_from: nil,
     synthetic: false,
     train_size: 60_000,
     test_size: 10_000
@@ -156,6 +224,8 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "Random seed") { |v| options[:seed] = v }
     opts.on("--data-root PATH", String, "Dataset cache directory") { |v| options[:data_root] = v }
     opts.on("--python-bin BIN", String, "Python binary for bridge script") { |v| options[:python_bin] = v }
+    opts.on("--run-bundle PATH", String, "Auto-save DSL run bundle path") { |v| options[:run_bundle_path] = v }
+    opts.on("--resume-from SOURCE", String, "Resume source (checkpoint or run bundle path)") { |v| options[:resume_from] = v }
     opts.on("--synthetic", "Use synthetic data instead of downloading MNIST") { options[:synthetic] = true }
     opts.on("--train-size N", Integer, "Synthetic train size") { |v| options[:train_size] = v }
     opts.on("--test-size N", Integer, "Synthetic test size") { |v| options[:test_size] = v }

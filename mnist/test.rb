@@ -26,6 +26,10 @@ if $PROGRAM_NAME == __FILE__
   raise "Test label shape mismatch" unless test_y.shape == [32]
 
   model = MnistExample::MLP.new(num_layers: 2, input_dim: 784, hidden_dim: 32, output_dim: 10)
+  raise "MLP missing DSL trainer helper" unless model.respond_to?(:trainer)
+  unless model.respond_to?(:save_checkpoint) && model.respond_to?(:load_checkpoint)
+    raise "MLP missing DSL checkpoint helpers"
+  end
   ids = MLX::Core.array((0...16).to_a, MLX::Core.int32)
   sample_x = MLX::Core.take(train_x, ids, 0)
   sample_y = MLX::Core.take(train_y, ids, 0)

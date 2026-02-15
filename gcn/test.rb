@@ -39,6 +39,7 @@ if $PROGRAM_NAME == __FILE__
     dropout: 0.2,
     bias: true
   )
+  raise "GCN missing DSL trainer helper" unless model.respond_to?(:trainer)
 
   logits = model.call(x, adj)
   MLX::Core.eval(logits)
