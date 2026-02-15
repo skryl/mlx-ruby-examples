@@ -46,8 +46,17 @@ The runner prints sequence and pooled output shapes.
 
 ## Parity Test
 
+Default test path is synthetic/offline and does not require Python packages:
+
+```bash
+ruby bert/test.rb
+```
+
+Run Hugging Face parity integration explicitly:
+
 ```bash
 ruby bert/test.rb \
+  --integration \
   --bert-model bert-base-uncased \
   --mlx-model bert/weights/bert-base-uncased.npz \
   --config-path bert/weights/bert-base-uncased.config.json \

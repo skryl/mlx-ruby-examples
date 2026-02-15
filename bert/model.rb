@@ -165,7 +165,7 @@ module BertExample
     intermediate_size
   ].freeze
 
-  def load_model(bert_model:, weights_path:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "python3"))
+  def load_model(bert_model:, weights_path:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"))
     if weights_path.nil? || weights_path.to_s.empty? || !File.exist?(weights_path)
       raise ArgumentError, "No model weights found in #{weights_path.inspect}"
     end
@@ -193,7 +193,7 @@ module BertExample
     [model, tokenizer]
   end
 
-  def run(bert_model:, mlx_model:, batch:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "python3"))
+  def run(bert_model:, mlx_model:, batch:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"))
     model, tokenizer = load_model(
       bert_model: bert_model,
       weights_path: mlx_model,
@@ -211,7 +211,7 @@ if $PROGRAM_NAME == __FILE__
     mlx_model: "weights/bert-base-uncased.npz",
     text: [],
     config_path: nil,
-    python_bin: ENV.fetch("PYTHON_BIN", "python3"),
+    python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"),
     json_out: nil
   }
 

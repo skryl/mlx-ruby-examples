@@ -8,7 +8,7 @@ if $PROGRAM_NAME == __FILE__
   options = {
     bert_model: "bert-base-uncased",
     mlx_model: "weights/bert-base-uncased.npz",
-    python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3")
   }
 
   parser = OptionParser.new do |opts|
