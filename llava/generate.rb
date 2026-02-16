@@ -8,6 +8,21 @@ require "pathname"
 require_relative "llava"
 
 module LlavaExample
+  class LlavaDecodeAdapter
+    def initialize(model:, pixel_values:)
+      @model = model
+      @pixel_values = pixel_values
+    end
+
+    def call(input_ids, cache: nil, **kwargs)
+      if cache.nil?
+        @model.call(input_ids, @pixel_values, cache: nil)
+      else
+        @model.language_model.call(input_ids, cache: cache, **kwargs)
+      end
+    end
+  end
+
   class ProcessorBridge
     SCRIPT_PATH = Pathname.new(__dir__).join("python", "processor_bridge.py").to_s
 
@@ -76,21 +91,22 @@ module LlavaExample
   end
 
   def generate_text(input_ids:, pixel_values:, model:, processor:, max_tokens:, temperature:)
-    logits, cache = model.call(input_ids, pixel_values)
-    logits = last_logits(logits)
-    y = sample(logits, temperature: temperature)
+    sampler = if temperature.to_f.zero?
+      { strategy: :argmax }
+    else
+      { strategy: :temperature, temperature: temperature.to_f }
+    end
+    adapter = LlavaDecodeAdapter.new(model: model, pixel_values: pixel_values)
+    generator = MLX::DSL::Generate.new(
+      model: adapter,
+      eos_id: processor.eos_token_id,
+      sampler: sampler,
+      mode: :decoder_only
+    )
 
-    token = y.item.to_i
-    tokens = [token]
-
-    (max_tokens - 1).times do
-      logits, cache = model.language_model.call(MLX::Core.expand_dims(y, 0), cache: cache)
-      logits = last_logits(logits)
-      y = sample(logits, temperature: temperature)
-      token = y.item.to_i
-      break if !processor.eos_token_id.nil? && token == processor.eos_token_id
-
-      tokens << token
+    tokens = []
+    generator.each_token(input_ids: input_ids, max_tokens: max_tokens) do |token_id, _chunk|
+      tokens << token_id.to_i
     end
 
     processor.decode(tokens)

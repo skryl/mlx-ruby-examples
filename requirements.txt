@@ -1,0 +1,21 @@
+# Install all top-level example Python dependencies in one command:
+#   python3 -m pip install -r requirements.txt
+
+-r bert/requirements.txt
+-r cifar/requirements.txt
+-r clip/requirements.txt
+-r cvae/requirements.txt
+-r encodec/requirements.txt
+-r flux/requirements.txt
+-r gcn/requirements.txt
+-r llava/requirements.txt
+-r lora/requirements.txt
+-r mnist/requirements.txt
+-r musicgen/requirements.txt
+-r normalizing_flow/requirements.txt
+-r segment_anything/requirements.txt
+-r speechcommands/requirements.txt
+-r stable_diffusion/requirements.txt
+-r t5/requirements.txt
+-r transformer_lm/requirements.txt
+-r whisper/requirements.txt

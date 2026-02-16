@@ -25,7 +25,7 @@ module TransformerLmExample
 
     def call(x)
       length = x.shape[1]
-      mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(length)
+      mask = MLX::DSL::Masks.causal(length: length, dtype: MLX::Core.float32)
       hidden = embedding.call(x)
       hidden = MLX::Core.add(hidden, pe.call(MLX::Core.arange(0, length, 1)))
       hidden = transformer.call(hidden, mask)
@@ -69,7 +69,7 @@ module TransformerLmExample
 
       Enumerator.new do |enum|
         loop do
-          order = (0...inputs.shape[0]).to_a
+          order = Array.new(inputs.shape[0]) { |i| i }
           order.shuffle!(random: rng)
           order.each_slice(batch_size) do |batch_ids|
             ids = MLX::Core.array(batch_ids, MLX::Core.int32)

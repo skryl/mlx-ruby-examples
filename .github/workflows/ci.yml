@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Parse tool versions
+        id: tool-versions
+        shell: bash
+        run: |
+          ruby_version="$(awk '$1 == "ruby" { print $2 }' .tool-versions)"
+          python_version="$(awk '$1 == "python" { print $2 }' .tool-versions)"
+
+          if [[ -z "${ruby_version}" || -z "${python_version}" ]]; then
+            echo "Failed to parse ruby/python from .tool-versions"
+            exit 1
+          fi
+
+          echo "ruby=${ruby_version}" >> "${GITHUB_OUTPUT}"
+          echo "python=${python_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.tool-versions.outputs.python }}
+          cache: pip
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ steps.tool-versions.outputs.ruby }}
+          bundler-cache: true
+
+      - name: Verify Metal toolchain availability
+        shell: bash
+        run: |
+          xcrun -f metal
+          xcrun metal -v | head -n 1
+
+      - name: Install Python test dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          PYTHON_BIN: python
+        run: bundle exec rake test

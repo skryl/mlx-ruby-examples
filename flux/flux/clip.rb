@@ -2,30 +2,22 @@
 
 
 require "mlx"
+require "mlx/dsl"
 
 module FluxExample
   class CLIPTextModelConfig
-    attr_reader :num_layers, :model_dims, :num_heads, :max_length, :vocab_size, :hidden_act
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      num_layers: 6,
-      model_dims: 768,
-      num_heads: 12,
-      max_length: 77,
-      vocab_size: 49_408,
-      hidden_act: "quick_gelu"
-    )
-      @num_layers = num_layers
-      @model_dims = model_dims
-      @num_heads = num_heads
-      @max_length = max_length
-      @vocab_size = vocab_size
-      @hidden_act = hidden_act
-    end
+    field :num_layers, Integer, default: 6
+    field :model_dims, Integer, default: 768
+    field :num_heads, Integer, default: 12
+    field :max_length, Integer, default: 77
+    field :vocab_size, Integer, default: 49_408
+    field :hidden_act, String, default: "quick_gelu"
 
     def self.from_dict(config)
       p = config.transform_keys(&:to_s)
-      new(
+      from_hash(
         num_layers: p.fetch("num_hidden_layers", p.fetch("num_layers", 6)),
         model_dims: p.fetch("hidden_size", p.fetch("model_dims", 768)),
         num_heads: p.fetch("num_attention_heads", p.fetch("num_heads", 12)),
@@ -98,18 +90,20 @@ module FluxExample
     end
 
     def sanitize(weights)
-      weights.each_with_object({}) do |(key, value), out|
-        key = key.to_s
-        key = key.delete_prefix("text_model.")
-        key = key.delete_prefix("embeddings.")
-        key = key.delete_prefix("encoder.")
-        key = key.gsub("self_attn.", "attention.")
-        key = key.gsub("q_proj.", "query_proj.")
-        key = key.gsub("k_proj.", "key_proj.")
-        key = key.gsub("v_proj.", "value_proj.")
-        key = key.gsub("mlp.fc1", "linear1")
-        key = key.gsub("mlp.fc2", "linear2")
-        out[key] = value
+      self.class.weight_mapper.apply(weights)
+    end
+
+    def self.weight_mapper
+      @weight_mapper ||= MLX::DSL.weight_map do
+        strip_prefix "text_model."
+        strip_prefix "embeddings."
+        strip_prefix "encoder."
+        rename "self_attn." => "attention."
+        rename "q_proj." => "query_proj."
+        rename "k_proj." => "key_proj."
+        rename "v_proj." => "value_proj."
+        rename "mlp.fc1" => "linear1"
+        rename "mlp.fc2" => "linear2"
       end
     end
 
@@ -153,15 +147,13 @@ module FluxExample
     def select_eos(x, eos_tokens)
       b = x.shape[0]
       d = x.shape[2]
-      out = []
-      x_arr = x.to_a
-      eos_arr = eos_tokens.to_a
-      b.times do |i|
-        idx = eos_arr[i].to_i
-        idx = [[idx, 0].max, x.shape[1] - 1].min
-        out << x_arr[i][idx]
-      end
-      MLX::Core.array(out, x.dtype).reshape([b, d])
+      idx = eos_tokens.astype(MLX::Core.int32)
+      idx = MLX::Core.maximum(idx, 0)
+      idx = MLX::Core.minimum(idx, x.shape[1] - 1)
+      idx = MLX::Core.reshape(idx, [b, 1, 1])
+      idx = MLX::Core.broadcast_to(idx, [b, 1, d])
+      selected = MLX::Core.take_along_axis(x, idx, 1)
+      MLX::Core.squeeze(selected, 1)
     end
   end
 end

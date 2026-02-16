@@ -1,0 +1,1 @@
+../../flux/generate_interactive.rb

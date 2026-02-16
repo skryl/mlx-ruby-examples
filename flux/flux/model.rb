@@ -2,51 +2,26 @@
 
 
 require "mlx"
+require "mlx/dsl"
 
 require_relative "layers"
 
 module FluxExample
   class FluxParams
-    attr_reader :in_channels,
-                :vec_in_dim,
-                :context_in_dim,
-                :hidden_size,
-                :mlp_ratio,
-                :num_heads,
-                :depth,
-                :depth_single_blocks,
-                :axes_dim,
-                :theta,
-                :qkv_bias,
-                :guidance_embed
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      in_channels:,
-      vec_in_dim:,
-      context_in_dim:,
-      hidden_size:,
-      mlp_ratio:,
-      num_heads:,
-      depth:,
-      depth_single_blocks:,
-      axes_dim:,
-      theta:,
-      qkv_bias:,
-      guidance_embed:
-    )
-      @in_channels = in_channels
-      @vec_in_dim = vec_in_dim
-      @context_in_dim = context_in_dim
-      @hidden_size = hidden_size
-      @mlp_ratio = mlp_ratio
-      @num_heads = num_heads
-      @depth = depth
-      @depth_single_blocks = depth_single_blocks
-      @axes_dim = axes_dim
-      @theta = theta
-      @qkv_bias = qkv_bias
-      @guidance_embed = guidance_embed
-    end
+    field :in_channels, Integer, required: true
+    field :vec_in_dim, Integer, required: true
+    field :context_in_dim, Integer, required: true
+    field :hidden_size, Integer, required: true
+    field :mlp_ratio, [Integer, Float], required: true
+    field :num_heads, Integer, required: true
+    field :depth, Integer, required: true
+    field :depth_single_blocks, Integer, required: true
+    field :axes_dim, Array, required: true
+    field :theta, [Integer, Float], required: true
+    field :qkv_bias, [TrueClass, FalseClass], required: true
+    field :guidance_embed, [TrueClass, FalseClass], required: true
   end
 
   class Flux < MLX::NN::Module
@@ -92,21 +67,17 @@ module FluxExample
     end
 
     def sanitize(weights)
-      new_weights = {}
-      weights.each do |k, w|
-        key = k.to_s
-        key = key[22..] if key.start_with?("model.diffusion_model.")
-        key = "#{key[0...-6]}.weight" if key.end_with?(".scale")
-        %w[img_mlp txt_mlp adaLN_modulation].each do |seq|
-          needle = ".#{seq}."
-          if key.include?(needle)
-            key = key.gsub(needle, ".#{seq}.layers.")
-            break
-          end
-        end
-        new_weights[key] = w
+      self.class.weight_mapper.apply(weights)
+    end
+
+    def self.weight_mapper
+      @weight_mapper ||= MLX::DSL.weight_map do
+        strip_prefix "model.diffusion_model."
+        regex(/\.scale\z/, ".weight")
+        rename ".img_mlp." => ".img_mlp.layers."
+        rename ".txt_mlp." => ".txt_mlp.layers."
+        rename ".adaLN_modulation." => ".adaLN_modulation.layers."
       end
-      new_weights
     end
 
     def shard(_group = nil)
@@ -137,9 +108,7 @@ module FluxExample
       end
 
       joined = MLX::Core.concatenate([txt, img], 1)
-      single_blocks.each do |block|
-        joined = block.call(joined, vec: vec, pe: pe)
-      end
+      joined = MLX::DSL.run_stack(single_blocks, joined, vec: vec, pe: pe)
 
       txt_len = txt.shape[1]
       joined = MLX::Core.slice(

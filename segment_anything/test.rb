@@ -5,7 +5,7 @@ require "optparse"
 require_relative "automatic_mask_generator"
 require_relative "predictor"
 require_relative "sam"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 173 }
   parser = OptionParser.new do |opts|
@@ -13,6 +13,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -24,11 +29,11 @@ if $PROGRAM_NAME == __FILE__
     num_heads: 4,
     prompt_embed_dim: 64
   )
+  BenchmarkDeterministic.reinitialize_module!(model) if benchmark_enabled
 
   image = MLX::Core.random_uniform([64, 64, 3], 0.0, 255.0, MLX::Core.float32)
   point_coords = MLX::Core.array([[[20.0, 22.0]]], MLX::Core.float32)
   point_labels = MLX::Core.array([[1]], MLX::Core.int32)
-
   outputs = model.call(
     [
       {
@@ -52,6 +57,24 @@ if $PROGRAM_NAME == __FILE__
     raise "Unexpected SAM output mask shape #{masks.shape.inspect}"
   end
   raise "Unexpected IoU shape #{iou.shape.inspect}" unless iou.shape == [1, 3]
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "segment_anything",
+      inputs: { image: image, point_coords: point_coords, point_labels: point_labels },
+      outputs: { iou: iou },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   predictor = SegmentAnything::SamPredictor.new(model)
   predictor.set_image(image)

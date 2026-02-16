@@ -7,6 +7,7 @@ require "pathname"
 ROOT = File.expand_path("../..", __dir__)
 
 require "mlx"
+require "mlx/dsl"
 
 require_relative "utils"
 
@@ -14,62 +15,27 @@ module GGUFLLM
   SCRIPT_DIR = Pathname.new(__dir__).join("python")
 
   class ModelArgs
-    attr_reader :hidden_size,
-                :num_hidden_layers,
-                :intermediate_size,
-                :num_attention_heads,
-                :rms_norm_eps,
-                :vocab_size,
-                :context_length,
-                :num_key_value_heads,
-                :rope_theta,
-                :rope_traditional,
-                :model_type,
-                :rope_scaling
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      hidden_size:,
-      num_hidden_layers:,
-      intermediate_size:,
-      num_attention_heads:,
-      rms_norm_eps:,
-      vocab_size:,
-      context_length:,
-      num_key_value_heads: nil,
-      rope_theta: 10_000,
-      rope_traditional: false,
-      model_type: nil,
-      rope_scaling: nil
-    )
-      @hidden_size = hidden_size
-      @num_hidden_layers = num_hidden_layers
-      @intermediate_size = intermediate_size
-      @num_attention_heads = num_attention_heads
-      @rms_norm_eps = rms_norm_eps
-      @vocab_size = vocab_size
-      @context_length = context_length
-      @num_key_value_heads = num_key_value_heads || num_attention_heads
-      @rope_theta = rope_theta
-      @rope_traditional = rope_traditional
-      @model_type = model_type
-      @rope_scaling = rope_scaling
-
-      validate_rope_scaling!
-    end
-
-    private
-
-    def validate_rope_scaling!
-      return if rope_scaling.nil?
-
+    field :hidden_size, Integer, required: true
+    field :num_hidden_layers, Integer, required: true
+    field :intermediate_size, Integer, required: true
+    field :num_attention_heads, Integer, required: true
+    field :rms_norm_eps, [Integer, Float], required: true
+    field :vocab_size, Integer, required: true
+    field :context_length, Integer, required: true
+    field :num_key_value_heads, Integer, default: ->(cfg) { cfg.num_attention_heads }
+    field :rope_theta, [Integer, Float], default: 10_000.0
+    field :rope_traditional, [TrueClass, FalseClass], default: false
+    field :model_type, [String, NilClass], default: nil
+    field :rope_scaling, [Hash, NilClass], default: nil do |value|
+      next if value.nil?
       required = %w[factor type]
-      unless required.all? { |k| rope_scaling.key?(k) || rope_scaling.key?(k.to_sym) }
+      unless required.all? { |key| value.key?(key) || value.key?(key.to_sym) }
         raise ArgumentError, "rope_scaling must contain keys #{required.inspect}"
       end
-      type = rope_scaling["type"] || rope_scaling[:type]
-      return if type == "linear"
-
-      raise ArgumentError, "rope_scaling 'type' currently only supports 'linear'"
+      kind = value["type"] || value[:type]
+      raise ArgumentError, "rope_scaling 'type' currently only supports 'linear'" unless kind == "linear"
     end
   end
 
@@ -193,19 +159,17 @@ module GGUFLLM
 
     def call(inputs, cache: nil)
       hidden = embed_tokens.call(inputs)
+      offset = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
 
       mask = nil
-      if hidden.shape[1] > 1
-        mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(hidden.shape[1])
-        mask = mask.astype(hidden.dtype)
+      if hidden.shape[1] > 1 || offset.positive?
+        mask = MLX::DSL::Masks.causal(length: hidden.shape[1], offset: offset, dtype: hidden.dtype)
       end
 
-      cache ||= Array.new(layers.length)
-      layers.each_with_index do |layer, e|
-        hidden, cache[e] = layer.call(hidden, mask: mask, cache: cache[e])
-      end
+      cache_state = cache || Array.new(layers.length)
+      hidden, next_cache = MLX::DSL.run_stack(layers, hidden, mask: mask, cache: cache_state)
 
-      [norm.call(hidden), cache]
+      [norm.call(hidden), next_cache]
     end
   end
 
@@ -267,22 +231,28 @@ module GGUFLLM
     }
   end
 
+  def weight_mapper
+    MLX::DSL.weight_map do
+      rename "blk." => "model.layers."
+      rename "ffn_gate" => "mlp.gate_proj"
+      rename "ffn_down" => "mlp.down_proj"
+      rename "ffn_up" => "mlp.up_proj"
+      rename "attn_q" => "self_attn.q_proj"
+      rename "attn_k" => "self_attn.k_proj"
+      rename "attn_v" => "self_attn.v_proj"
+      rename "attn_output" => "self_attn.o_proj"
+      rename "attn_norm" => "input_layernorm"
+      rename "ffn_norm" => "post_attention_layernorm"
+      rename "token_embd" => "model.embed_tokens"
+      rename "output_norm" => "model.norm"
+      rename "output" => "lm_head"
+    end
+  end
+
+  # Backward-compatible key translation helper used by existing tests/tools.
   def translate_weight_names(name)
-    out = name.to_s.dup
-    out = out.gsub("blk.", "model.layers.")
-    out = out.gsub("ffn_gate", "mlp.gate_proj")
-    out = out.gsub("ffn_down", "mlp.down_proj")
-    out = out.gsub("ffn_up", "mlp.up_proj")
-    out = out.gsub("attn_q", "self_attn.q_proj")
-    out = out.gsub("attn_k", "self_attn.k_proj")
-    out = out.gsub("attn_v", "self_attn.v_proj")
-    out = out.gsub("attn_output", "self_attn.o_proj")
-    out = out.gsub("attn_norm", "input_layernorm")
-    out = out.gsub("ffn_norm", "post_attention_layernorm")
-    out = out.gsub("token_embd", "model.embed_tokens")
-    out = out.gsub("output_norm", "model.norm")
-    out = out.gsub("output", "lm_head")
-    out
+    mapped = weight_mapper.apply({name.to_s => nil})
+    mapped.keys.first
   end
 
   def snapshot_download(repo:, gguf_file:, python_bin: ENV.fetch("PYTHON_BIN", "python3"))
@@ -325,13 +295,10 @@ module GGUFLLM
       nil
     end
 
-    renamed = {}
-    weights.to_a.each do |k, v|
-      renamed[translate_weight_names(k)] = v
-    end
+    renamed = weight_mapper.apply(weights)
 
     config = get_config(metadata)
-    model = Model.new(ModelArgs.new(**config.transform_keys(&:to_sym)))
+    model = Model.new(ModelArgs.from_hash(config))
 
     if !quantization.nil?
       class_predicate = lambda do |path, module_obj|
@@ -345,24 +312,16 @@ module GGUFLLM
     [model, tokenizer]
   end
 
-  def generate(prompt, model, temp: 0.0)
-    sample = lambda do |logits|
-      if temp.to_f.zero?
-        MLX::Core.argmax(logits, -1)
-      else
-        MLX::Core.categorical(MLX::Core.multiply(logits, 1.0 / temp.to_f))
-      end
+  def generate(prompt, model, temp: 0.0, max_tokens: 1_000_000)
+    sampler = if temp.to_f.zero?
+      { strategy: :argmax }
+    else
+      { strategy: :temperature, temperature: temp.to_f }
     end
-
+    generator = MLX::DSL::Generate.new(model: model, sampler: sampler, mode: :decoder_only)
     Enumerator.new do |emitter|
-      y = prompt
-      cache = nil
-      loop do
-        logits, cache = model.call(MLX::Core.expand_dims(y, 0), cache: cache)
-        last_idx = MLX::Core.array([logits.shape[1] - 1], MLX::Core.int32)
-        step_logits = MLX::Core.squeeze(MLX::Core.take(logits, last_idx, 1), 1)
-        y = sample.call(step_logits)
-        emitter << y
+      generator.each_token(input_ids: prompt, max_tokens: max_tokens) do |token_id, _chunk|
+        emitter << MLX::Core.array(token_id, MLX::Core.int32)
       end
     end
   end

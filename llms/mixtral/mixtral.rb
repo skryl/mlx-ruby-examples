@@ -8,32 +8,21 @@ require "pathname"
 ROOT = File.expand_path("../..", __dir__)
 
 require "mlx"
+require "mlx/dsl"
 
 module MixtralExample
   class ModelArgs
-    attr_reader :dim, :n_layers, :head_dim, :hidden_dim, :n_heads, :n_kv_heads, :norm_eps, :vocab_size, :moe
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      dim:,
-      n_layers:,
-      head_dim:,
-      hidden_dim:,
-      n_heads:,
-      n_kv_heads:,
-      norm_eps:,
-      vocab_size:,
-      moe:
-    )
-      @dim = dim
-      @n_layers = n_layers
-      @head_dim = head_dim
-      @hidden_dim = hidden_dim
-      @n_heads = n_heads
-      @n_kv_heads = n_kv_heads
-      @norm_eps = norm_eps
-      @vocab_size = vocab_size
-      @moe = moe
-    end
+    field :dim, Integer, required: true
+    field :n_layers, Integer, required: true
+    field :head_dim, Integer, required: true
+    field :hidden_dim, Integer, required: true
+    field :n_heads, Integer, required: true
+    field :n_kv_heads, Integer, required: true
+    field :norm_eps, [Integer, Float], required: true
+    field :vocab_size, Integer, required: true
+    field :moe, Hash, required: true
   end
 
   class Tokenizer
@@ -124,7 +113,8 @@ module MixtralExample
         keys = rope.call(keys)
       end
 
-      output = MLX::Core.scaled_dot_product_attention(queries, keys, values, @scale, mask)
+      attn_mask = mask.nil? ? nil : mask.astype(queries.dtype)
+      output = MLX::Core.scaled_dot_product_attention(queries, keys, values, @scale, attn_mask)
       output = MLX::Core.transpose(output, [0, 2, 1, 3])
       output = MLX::Core.reshape(output, [batch_size, seq_len, @n_heads * @head_dim])
       [wo.call(output), [keys, values]]
@@ -162,7 +152,7 @@ module MixtralExample
 
       gates = gate.call(x)
       inds = MLX::Core.argpartition(MLX::Core.multiply(gates, -1.0), ne - 1, -1)
-      take_ids = MLX::Core.array((0...ne).to_a, MLX::Core.int32)
+      take_ids = MLX::Core.arange(0, ne, 1, MLX::Core.int32)
       inds = MLX::Core.take(inds, take_ids, 1)
 
       scores = MLX::Core.take_along_axis(gates, inds, -1)
@@ -224,22 +214,20 @@ module MixtralExample
     def call(inputs, cache: nil)
       hidden = tok_embeddings.call(inputs)
       seq_len = hidden.shape[1]
+      offset = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
 
       mask = nil
-      if seq_len > 1
-        mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(seq_len)
-        mask = mask.astype(hidden.dtype)
+      if seq_len > 1 || offset.positive?
+        mask = MLX::DSL::Masks.causal(length: seq_len, offset: offset, dtype: hidden.dtype)
       end
 
-      cache ||= Array.new(layers.length)
-      layers.each_with_index do |layer, i|
-        hidden, cache[i] = layer.call(hidden, mask: mask, cache: cache[i])
-      end
+      cache_state = cache || Array.new(layers.length)
+      hidden, next_cache = MLX::DSL.run_stack(layers, hidden, mask: mask, cache: cache_state)
 
       hidden = norm.call(hidden)
       last_idx = MLX::Core.array([seq_len - 1], MLX::Core.int32)
       last_hidden = MLX::Core.take(hidden, last_idx, 1)
-      [output.call(last_hidden), cache]
+      [output.call(last_hidden), next_cache]
     end
   end
 
@@ -266,7 +254,7 @@ module MixtralExample
     config = JSON.parse(File.binread(model_path.join("config.json")))
     config.delete("model_type")
     quantization = config.delete("quantization")
-    model_args = ModelArgs.new(
+    model_args = ModelArgs.from_hash(
       dim: config.fetch("dim"),
       n_layers: config.fetch("n_layers"),
       head_dim: config.fetch("head_dim"),
@@ -286,24 +274,16 @@ module MixtralExample
     [model, tokenizer]
   end
 
-  def generate(prompt, model, temp: 0.0)
-    sample = lambda do |logits|
-      if temp.to_f.zero?
-        MLX::Core.argmax(logits, -1)
-      else
-        MLX::Core.categorical(MLX::Core.multiply(logits, 1.0 / temp.to_f))
-      end
+  def generate(prompt, model, temp: 0.0, max_tokens: 1_000_000)
+    sampler = if temp.to_f.zero?
+      { strategy: :argmax }
+    else
+      { strategy: :temperature, temperature: temp.to_f }
     end
-
+    generator = MLX::DSL::Generate.new(model: model, sampler: sampler, mode: :decoder_only)
     Enumerator.new do |emitter|
-      logits, cache = model.call(MLX::Core.expand_dims(prompt, 0))
-      y = sample.call(MLX::Core.squeeze(logits, 1))
-      emitter << y
-
-      loop do
-        logits, cache = model.call(MLX::Core.expand_dims(y, 1), cache: cache)
-        y = sample.call(MLX::Core.squeeze(logits, 1))
-        emitter << y
+      generator.each_token(input_ids: MLX::Core.expand_dims(prompt, 0), max_tokens: max_tokens) do |token_id, _chunk|
+        emitter << MLX::Core.array(token_id, MLX::Core.int32)
       end
     end
   end
@@ -340,7 +320,7 @@ if $PROGRAM_NAME == __FILE__
   tokens = []
   stop = false
 
-  MixtralExample.generate(prompt, model, temp: options[:temp]).each_with_index do |token, idx|
+  MixtralExample.generate(prompt, model, temp: options[:temp], max_tokens: options[:max_tokens]).each_with_index do |token, idx|
     tokens << token
     if (tokens.length % 10).zero?
       MLX::Core.eval(*tokens)

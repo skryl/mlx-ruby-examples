@@ -2,6 +2,7 @@
 
 
 require "mlx"
+require "mlx/dsl"
 
 module CvaeExample
   module_function

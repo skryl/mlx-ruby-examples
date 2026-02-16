@@ -135,7 +135,7 @@ module SegmentAnything
       )
 
       if multimask_output
-        idx = MLX::Core.array((1...@num_mask_tokens).to_a, MLX::Core.int32)
+        idx = MLX::Core.arange(1, @num_mask_tokens, 1, MLX::Core.int32)
       else
         idx = MLX::Core.array([0], MLX::Core.int32)
       end

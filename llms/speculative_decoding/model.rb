@@ -7,38 +7,26 @@ require "pathname"
 ROOT = File.expand_path("../..", __dir__)
 
 require "mlx"
+require "mlx/dsl"
 
 module SpeculativeDecodingExample
   SCRIPT_DIR = Pathname.new(__dir__).join("python")
 
   class T5Config
-    attr_reader :d_model,
-                :d_kv,
-                :d_ff,
-                :num_heads,
-                :num_layers,
-                :num_decoder_layers,
-                :layer_norm_epsilon,
-                :relative_attention_num_buckets,
-                :relative_attention_max_distance,
-                :feed_forward_proj,
-                :tie_word_embeddings,
-                :vocab_size
+    include MLX::DSL::ConfigSchema
 
-    def initialize(config)
-      @d_model = config.fetch("d_model")
-      @d_kv = config.fetch("d_kv")
-      @d_ff = config["d_ff"]
-      @num_heads = config.fetch("num_heads")
-      @num_layers = config.fetch("num_layers")
-      @num_decoder_layers = config["num_decoder_layers"] || @num_layers
-      @layer_norm_epsilon = config.fetch("layer_norm_epsilon")
-      @relative_attention_num_buckets = config.fetch("relative_attention_num_buckets")
-      @relative_attention_max_distance = config.fetch("relative_attention_max_distance")
-      @feed_forward_proj = config.fetch("feed_forward_proj")
-      @tie_word_embeddings = config.fetch("tie_word_embeddings")
-      @vocab_size = config.fetch("vocab_size")
-    end
+    field :d_model, Integer, required: true
+    field :d_kv, Integer, required: true
+    field :d_ff, [Integer, NilClass], default: nil
+    field :num_heads, Integer, required: true
+    field :num_layers, Integer, required: true
+    field :num_decoder_layers, Integer, default: ->(cfg) { cfg.num_layers }
+    field :layer_norm_epsilon, [Integer, Float], required: true
+    field :relative_attention_num_buckets, Integer, required: true
+    field :relative_attention_max_distance, Integer, required: true
+    field :feed_forward_proj, String, required: true
+    field :tie_word_embeddings, [TrueClass, FalseClass], required: true
+    field :vocab_size, Integer, required: true
   end
 
   module_function
@@ -50,7 +38,7 @@ module SpeculativeDecodingExample
       raise RuntimeError, "Failed to load T5 config for #{model_name}: #{stderr}"
     end
 
-    T5Config.new(JSON.parse(stdout))
+    T5Config.from_hash(JSON.parse(stdout))
   end
 
   def relative_position_bucket(
@@ -94,16 +82,7 @@ module SpeculativeDecodingExample
   end
 
   def create_additive_causal_mask(n, offset: 0)
-    rinds = MLX::Core.arange(0, offset + n, 1)
-    linds = if offset.zero?
-      rinds
-    else
-      MLX::Core.arange(offset, offset + n, 1)
-    end
-    lhs = MLX::Core.expand_dims(linds, 1)
-    rhs = MLX::Core.expand_dims(rinds, 0)
-    mask = MLX::Core.less(lhs, rhs).astype(MLX::Core.float32)
-    MLX::Core.multiply(mask, -1e9)
+    MLX::DSL::Masks.causal(length: n, offset: offset, dtype: MLX::Core.float32)
   end
 
   class RelativePositionBias < MLX::NN::Module
@@ -227,7 +206,8 @@ module SpeculativeDecodingExample
       self.dense = DenseActivation.new(config)
     end
 
-    def call(x, mask)
+    def call(x, mask = nil, **kwargs)
+      mask = kwargs[:mask] if kwargs.key?(:mask)
       y = ln1.call(x)
       y, = attention.call(y, y, y, mask: mask)
       x = MLX::Core.add(x, y)
@@ -248,9 +228,7 @@ module SpeculativeDecodingExample
 
     def call(x)
       pos_bias = relative_attention_bias.call(x.shape[1], x.shape[1])
-      layers.each do |layer|
-        x = layer.call(x, pos_bias)
-      end
+      x = MLX::DSL.run_stack(layers, x, mask: pos_bias)
       ln.call(x)
     end
   end
@@ -266,7 +244,7 @@ module SpeculativeDecodingExample
       self.dense = DenseActivation.new(config)
     end
 
-    def call(x, memory, mask, memory_mask, cache: nil)
+    def call(x, memory:, mask:, memory_mask: nil, cache: nil)
       y = ln1.call(x)
       y, new_cache = self_attention.call(y, y, y, mask: mask, cache: cache)
       x = MLX::Core.add(x, y)
@@ -291,12 +269,8 @@ module SpeculativeDecodingExample
     end
 
     def call(x, memory, cache: nil)
-      cache ||= Array.new(layers.length)
-      offset = if !cache[0].nil?
-        cache[0][0].shape[2]
-      else
-        0
-      end
+      cache_state = cache || MLX::DSL::KVCache.new(num_layers: layers.length)
+      offset = MLX::DSL::Positions.offset_from_cache(cache_state, layer: 0)
 
       t = x.shape[1]
       mask = if t > 1
@@ -312,10 +286,15 @@ module SpeculativeDecodingExample
         MLX::Core.add(mask, pos_bias)
       end
 
-      layers.each_with_index do |layer, e|
-        x, cache[e] = layer.call(x, memory, mask, nil, cache: cache[e])
-      end
-      [ln.call(x), cache]
+      x, next_cache = MLX::DSL.run_stack(
+        layers,
+        x,
+        memory: memory,
+        mask: mask,
+        memory_mask: nil,
+        cache: cache_state
+      )
+      [ln.call(x), next_cache]
     end
   end
 
@@ -351,6 +330,19 @@ module SpeculativeDecodingExample
 
     def truncate_cache(num_to_truncate)
       return if num_to_truncate <= 0
+      return if cache.nil?
+
+      if cache.respond_to?(:truncate!)
+        cache_length = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
+        return if cache_length.zero?
+
+        if num_to_truncate >= cache_length
+          reset_cache
+        else
+          cache.truncate!(tokens: cache_length - num_to_truncate)
+        end
+        return
+      end
       return if cache[0].nil?
 
       cache_length = cache[0][0].shape[2]
@@ -360,7 +352,7 @@ module SpeculativeDecodingExample
       end
 
       keep = cache_length - num_to_truncate
-      indices = MLX::Core.array((0...keep).to_a, MLX::Core.int32)
+      indices = MLX::Core.arange(0, keep, 1, MLX::Core.int32)
       self.cache = cache.map do |layer_cache|
         next nil if layer_cache.nil?
 

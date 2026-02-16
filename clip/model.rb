@@ -2,32 +2,22 @@
 
 
 require "mlx"
+require "mlx/dsl"
 
 module ClipExample
-  class CLIPModel < MLX::NN::Module
-    def initialize(
-      vocab_size: 259,
-      text_width: 256,
-      vision_width: 256,
-      embed_dim: 128,
-      image_size: 224,
-      patch_size: 16,
-      max_length: 77
-    )
-      super()
-      @embed_dim = embed_dim
-      @image_size = image_size
-      @patch_size = patch_size
-      @max_length = max_length
+  class CLIPModel < MLX::DSL::Model
+    option :vocab_size, default: 259
+    option :text_width, default: 256
+    option :vision_width, default: 256
+    option :embed_dim, default: 128
+    option :image_size, default: 224
+    option :patch_size, default: 16
+    option :max_length, default: 77
 
-      self.token_embedding = MLX::NN::Embedding.new(vocab_size, text_width)
-      self.text_projection = MLX::NN::Linear.new(text_width, embed_dim, bias: false)
-
-      self.vision_conv = MLX::NN::Conv2d.new(3, vision_width, patch_size, stride: patch_size, bias: false)
-      self.vision_projection = MLX::NN::Linear.new(vision_width, embed_dim, bias: false)
-
-      self.logit_scale = MLX::Core.array(Math.log(1.0 / 0.07), MLX::Core.float32)
-    end
+    layer :token_embedding, MLX::NN::Embedding, -> { vocab_size }, -> { text_width }
+    layer :text_projection, MLX::NN::Linear, -> { text_width }, -> { embed_dim }, bias: false
+    layer :vision_conv, MLX::NN::Conv2d, 3, -> { vision_width }, -> { patch_size }, stride: -> { patch_size }, bias: false
+    layer :vision_projection, MLX::NN::Linear, -> { vision_width }, -> { embed_dim }, bias: false
 
     def encode_text(input_ids)
       x = token_embedding.call(input_ids)
@@ -76,6 +66,10 @@ module ClipExample
     end
 
     private
+
+    def logit_scale
+      @logit_scale ||= MLX::Core.array(Math.log(1.0 / 0.07), MLX::Core.float32)
+    end
 
     def normalize(x)
       norm = MLX::Core.sqrt(MLX::Core.sum(MLX::Core.square(x), -1))

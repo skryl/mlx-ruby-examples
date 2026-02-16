@@ -43,15 +43,10 @@ module SegmentAnything
     end
 
     def forward_with_coords(coords_input, image_size)
-      coords = coords_input.to_a
       h, w = image_size
-      coords.each do |batch|
-        batch.each do |point|
-          point[0] = point[0].to_f / w.to_f
-          point[1] = point[1].to_f / h.to_f
-        end
-      end
-      pe_encoding(MLX::Core.array(coords, MLX::Core.float32))
+      coords = coords_input.astype(MLX::Core.float32)
+      scale = MLX::Core.array([w.to_f, h.to_f], MLX::Core.float32)
+      pe_encoding(MLX::Core.divide(coords, scale))
     end
 
     private
@@ -138,42 +133,48 @@ module SegmentAnything
       end
 
       point_embedding = pe_layer.forward_with_coords(points, input_image_size)
+      label_0 = MLX::Core.squeeze(point_embed[0].weight, 0)
+      label_1 = MLX::Core.squeeze(point_embed[1].weight, 0)
+      not_a_point = MLX::Core.squeeze(not_a_point_embed.weight, 0)
 
-      embeddings = point_embedding.to_a
-      label_values = labels.to_a
-      not_a_point = not_a_point_embed.weight.to_a[0]
-      label_0 = point_embed[0].weight.to_a[0]
-      label_1 = point_embed[1].weight.to_a[0]
-
-      embeddings.each_with_index do |batch, bi|
-        batch.each_with_index do |vec, pi|
-          label = label_values[bi][pi].to_i
-          if label == -1
-            batch[pi] = not_a_point.dup
-          elsif label == 0
-            batch[pi] = vec.zip(label_0).map { |a, b| a + b }
-          elsif label == 1
-            batch[pi] = vec.zip(label_1).map { |a, b| a + b }
-          end
-        end
-      end
-
-      MLX::Core.array(embeddings, point_embedding.dtype)
+      merged = MLX::DSL::Tensor.where_labels(
+        base: point_embedding,
+        labels: labels,
+        mapping: {
+          0 => label_0,
+          1 => label_1
+        },
+        mode: :add_or_replace
+      )
+      MLX::DSL::Tensor.where_labels(
+        base: merged,
+        labels: labels,
+        mapping: {
+          -1 => not_a_point
+        },
+        mode: :replace
+      )
     end
 
     def embed_boxes(boxes, pe_layer:)
       boxes = MLX::Core.add(boxes, 0.5)
       coords = MLX::Core.reshape(boxes, [boxes.shape[0], 2, 2])
       corner_embedding = pe_layer.forward_with_coords(coords, input_image_size)
-
-      corners = corner_embedding.to_a
-      add2 = point_embed[2].weight.to_a[0]
-      add3 = point_embed[3].weight.to_a[0]
-      corners.each do |sample|
-        sample[0] = sample[0].zip(add2).map { |a, b| a + b }
-        sample[1] = sample[1].zip(add3).map { |a, b| a + b }
-      end
-      MLX::Core.array(corners, corner_embedding.dtype)
+      add2 = MLX::Core.squeeze(point_embed[2].weight, 0)
+      add3 = MLX::Core.squeeze(point_embed[3].weight, 0)
+      corner_labels = MLX::Core.broadcast_to(
+        MLX::Core.array([0, 1], MLX::Core.int32),
+        [corner_embedding.shape[0], 2]
+      )
+      MLX::DSL::Tensor.where_labels(
+        base: corner_embedding,
+        labels: corner_labels,
+        mapping: {
+          0 => add2,
+          1 => add3
+        },
+        mode: :add_or_replace
+      )
     end
   end
 end

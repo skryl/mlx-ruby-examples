@@ -1,0 +1,1 @@
+../../speechcommands/requirements.txt

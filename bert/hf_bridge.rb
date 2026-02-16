@@ -51,6 +51,15 @@ module BertExample
       stdout, stderr, status = Open3.capture3(*@python_cmd, script_path, *args)
       return JSON.parse(stdout) if status.success?
 
+      missing = stderr[/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/, 1]
+      if !missing.nil?
+        req_path = Pathname.new(__dir__).join("requirements.txt").to_s
+        install_cmd = Shellwords.join(@python_cmd + ["-m", "pip", "install", "-r", req_path])
+        raise RuntimeError,
+              "python bridge missing dependency '#{missing}' for #{@python_bin}. " \
+              "Install with:\n#{install_cmd}\n\nOriginal error:\n#{stderr}"
+      end
+
       raise RuntimeError, "python bridge failed (#{@python_bin} #{script_path} #{args.join(' ')}):\n#{stderr}"
     rescue JSON::ParserError => e
       raise RuntimeError, "python bridge returned invalid JSON: #{e.message}"

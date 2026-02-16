@@ -12,20 +12,33 @@ if train_out.exists() and test_out.exists():
     print(json.dumps({"status": "exists"}))
     raise SystemExit(0)
 
-from mlx.data.datasets import load_cifar10
+def load_split(train):
+    try:
+        from mlx.data.datasets import load_cifar10
+
+        ds = load_cifar10(root=str(root), train=train)
+        stream = ds.to_stream()
+        images = []
+        labels = []
+        for row in stream:
+            images.append(row["image"])
+            labels.append(row["label"])
+        return np.stack(images), np.asarray(labels), "mlx-data"
+    except ModuleNotFoundError:
+        pass
+
+    from torchvision.datasets import CIFAR10
+
+    dataset = CIFAR10(root=str(root), train=train, download=True)
+    return np.asarray(dataset.data), np.asarray(dataset.targets), "torchvision"
 
 
 def dump(train, out_file):
-    ds = load_cifar10(root=str(root), train=train)
-    stream = ds.to_stream()
-    images = []
-    labels = []
-    for row in stream:
-        images.append(row["image"])
-        labels.append(row["label"])
-    np.savez(out_file, images=np.stack(images), labels=np.asarray(labels))
+    images, labels, backend = load_split(train)
+    np.savez(out_file, images=images, labels=labels)
+    return backend
 
 
-dump(True, str(train_out))
-dump(False, str(test_out))
-print(json.dumps({"status": "ok"}))
+train_backend = dump(True, str(train_out))
+test_backend = dump(False, str(test_out))
+print(json.dumps({"status": "ok", "backend": {"train": train_backend, "test": test_backend}}))

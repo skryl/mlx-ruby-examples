@@ -6,9 +6,23 @@ require "optparse"
 ROOT = File.expand_path("..", __dir__)
 
 require "mlx"
+require "mlx/dsl"
 require_relative "hf_bridge"
 
 module BertExample
+  class BertConfig
+    include MLX::DSL::ConfigSchema
+
+    field :vocab_size, Integer, required: true
+    field :hidden_size, Integer, required: true
+    field :type_vocab_size, Integer, required: true
+    field :max_position_embeddings, Integer, required: true
+    field :layer_norm_eps, [Integer, Float], default: 1e-12
+    field :num_hidden_layers, Integer, required: true
+    field :num_attention_heads, Integer, required: true
+    field :intermediate_size, Integer, required: true
+  end
+
   class HfTokenizer
     def initialize(model_name:, bridge:)
       @model_name = model_name
@@ -36,7 +50,8 @@ module BertExample
     layer :linear2, MLX::NN::Linear, -> { mlp_dims }, -> { dims }
     layer :gelu, MLX::NN::GELU
 
-    def call(x, mask)
+    def call(x, mask = nil, **kwargs)
+      mask = kwargs[:mask] if kwargs.key?(:mask)
       attention_out = attention.call(x, x, x, mask)
       add_and_norm = ln1.call(MLX::Core.add(x, attention_out))
 
@@ -61,10 +76,7 @@ module BertExample
     end
 
     def call(x, mask)
-      layers.each do |layer|
-        x = layer.call(x, mask)
-      end
-      x
+      MLX::DSL.run_stack(layers, x, mask: mask)
     end
   end
 
@@ -93,11 +105,7 @@ module BertExample
     private
 
     def position_ids_for(input_ids)
-      sequence_length = input_ids.shape[1]
-      base = MLX::Core.arange(0, sequence_length, 1)
-      base = base.astype(MLX::Core.int32)
-      base = MLX::Core.reshape(base, [1, sequence_length])
-      MLX::Core.broadcast_to(base, input_ids.shape)
+      MLX::DSL::Positions.ids_like(input_ids, dtype: MLX::Core.int32)
     end
   end
 
@@ -177,15 +185,16 @@ module BertExample
       raise ArgumentError, "config is missing required key(s): #{missing.join(', ')}"
     end
 
+    schema = BertConfig.from_hash(config)
     model = Bert.new(
-      vocab_size: config.fetch("vocab_size"),
-      hidden_size: config.fetch("hidden_size"),
-      type_vocab_size: config.fetch("type_vocab_size"),
-      max_position_embeddings: config.fetch("max_position_embeddings"),
-      layer_norm_eps: config.fetch("layer_norm_eps"),
-      num_hidden_layers: config.fetch("num_hidden_layers"),
-      num_attention_heads: config.fetch("num_attention_heads"),
-      intermediate_size: config.fetch("intermediate_size")
+      vocab_size: schema.vocab_size,
+      hidden_size: schema.hidden_size,
+      type_vocab_size: schema.type_vocab_size,
+      max_position_embeddings: schema.max_position_embeddings,
+      layer_norm_eps: schema.layer_norm_eps,
+      num_hidden_layers: schema.num_hidden_layers,
+      num_attention_heads: schema.num_attention_heads,
+      intermediate_size: schema.intermediate_size
     )
     model.load_weights(weights_path)
 

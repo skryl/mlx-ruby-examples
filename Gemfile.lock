@@ -1,9 +1,12 @@
 GEM
   remote: https://rubygems.org/
   specs:
+    base64 (0.3.0)
+    benchmark (0.5.0)
     minitest (6.0.1)
       prism (~> 1.5)
-    mlx (0.30.7.2)
+    mlx (0.30.7.3)
+    ostruct (0.6.3)
     prism (1.9.0)
     rake (13.3.1)
 
@@ -12,8 +15,11 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
+  base64
+  benchmark
   minitest
-  mlx (>= 0.30.7.2)
+  mlx (= 0.30.7.3)
+  ostruct
   rake
 
 BUNDLED WITH

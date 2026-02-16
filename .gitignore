@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
+.venv/
+benchmark/results/
+tmp/
 
 # Model weights and checkpoints
 **/weights/

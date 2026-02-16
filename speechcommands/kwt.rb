@@ -2,6 +2,7 @@
 
 
 require "mlx"
+require "mlx/dsl"
 
 module SpeechcommandsExample
   class FeedForward < MLX::NN::Module
@@ -80,11 +81,7 @@ module SpeechcommandsExample
     end
 
     def call(x)
-      hidden = x
-      layers.each do |layer|
-        hidden = layer.call(hidden)
-      end
-      hidden
+      MLX::DSL.run_stack(layers, x)
     end
   end
 

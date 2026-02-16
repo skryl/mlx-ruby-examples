@@ -5,87 +5,35 @@ require "json"
 ROOT = File.expand_path("..", __dir__)
 
 require "mlx"
+require "mlx/dsl"
 
 module LoraExample
   class ModelArgs
-    attr_accessor :hidden_size,
-                  :num_hidden_layers,
-                  :intermediate_size,
-                  :num_attention_heads,
-                  :rms_norm_eps,
-                  :vocab_size,
-                  :num_key_value_heads,
-                  :rope_theta,
-                  :rope_traditional,
-                  :model_type,
-                  :rope_scaling
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      hidden_size:,
-      num_hidden_layers:,
-      intermediate_size:,
-      num_attention_heads:,
-      rms_norm_eps:,
-      vocab_size:,
-      num_key_value_heads: nil,
-      rope_theta: 10_000.0,
-      rope_traditional: false,
-      model_type: nil,
-      rope_scaling: nil
-    )
-      @hidden_size = hidden_size
-      @num_hidden_layers = num_hidden_layers
-      @intermediate_size = intermediate_size
-      @num_attention_heads = num_attention_heads
-      @rms_norm_eps = rms_norm_eps
-      @vocab_size = vocab_size
-      @num_key_value_heads = num_key_value_heads || num_attention_heads
-      @rope_theta = rope_theta
-      @rope_traditional = rope_traditional
-      @model_type = model_type
-      @rope_scaling = rope_scaling
+    field :hidden_size, Integer, required: true
+    field :num_hidden_layers, Integer, required: true
+    field :intermediate_size, Integer, required: true
+    field :num_attention_heads, Integer, required: true
+    field :rms_norm_eps, [Integer, Float], required: true
+    field :vocab_size, Integer, required: true
+    field :num_key_value_heads, Integer, default: ->(cfg) { cfg.num_attention_heads }
+    field :rope_theta, [Integer, Float], default: 10_000.0
+    field :rope_traditional, [TrueClass, FalseClass], default: false
+    field :model_type, [String, NilClass], default: nil
+    field :rope_scaling, [Hash, NilClass], default: nil do |value|
+      next if value.nil?
 
-      unless @rope_scaling.nil?
-        required_keys = %w[factor type]
-        unless required_keys.all? { |k| @rope_scaling.key?(k) || @rope_scaling.key?(k.to_sym) }
-          raise ArgumentError, "rope_scaling must contain keys #{required_keys.inspect}"
-        end
-        scaling_type = @rope_scaling["type"] || @rope_scaling[:type]
-        raise ArgumentError, "rope_scaling type only supports linear" unless scaling_type == "linear"
+      required_keys = %w[factor type]
+      unless required_keys.all? { |key| value.key?(key) || value.key?(key.to_sym) }
+        raise ArgumentError, "rope_scaling must contain keys #{required_keys.inspect}"
       end
+      scaling_type = value["type"] || value[:type]
+      raise ArgumentError, "rope_scaling type only supports linear" unless scaling_type == "linear"
     end
 
     def self.from_dict(params)
-      params = params.transform_keys(&:to_s)
-      new(
-        hidden_size: params.fetch("hidden_size"),
-        num_hidden_layers: params.fetch("num_hidden_layers"),
-        intermediate_size: params.fetch("intermediate_size"),
-        num_attention_heads: params.fetch("num_attention_heads"),
-        rms_norm_eps: params.fetch("rms_norm_eps"),
-        vocab_size: params.fetch("vocab_size"),
-        num_key_value_heads: params["num_key_value_heads"],
-        rope_theta: params.fetch("rope_theta", 10_000.0),
-        rope_traditional: params.fetch("rope_traditional", false),
-        model_type: params["model_type"],
-        rope_scaling: params["rope_scaling"]
-      )
-    end
-
-    def to_h
-      {
-        "hidden_size" => hidden_size,
-        "num_hidden_layers" => num_hidden_layers,
-        "intermediate_size" => intermediate_size,
-        "num_attention_heads" => num_attention_heads,
-        "rms_norm_eps" => rms_norm_eps,
-        "vocab_size" => vocab_size,
-        "num_key_value_heads" => num_key_value_heads,
-        "rope_theta" => rope_theta,
-        "rope_traditional" => rope_traditional,
-        "model_type" => model_type,
-        "rope_scaling" => rope_scaling
-      }
+      from_hash(params)
     end
   end
 
@@ -304,19 +252,17 @@ module LoraExample
 
     def call(inputs, cache: nil)
       hidden = embed_tokens.call(inputs)
+      offset = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
 
       mask = nil
-      if hidden.shape[1] > 1
-        mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(hidden.shape[1])
-        mask = mask.astype(hidden.dtype)
+      if hidden.shape[1] > 1 || offset.positive?
+        mask = MLX::DSL::Masks.causal(length: hidden.shape[1], offset: offset, dtype: hidden.dtype)
       end
 
-      cache ||= Array.new(layers.length)
-      layers.each_with_index do |layer, i|
-        hidden, cache[i] = layer.call(hidden, mask: mask, cache: cache[i])
-      end
+      cache_state = cache || Array.new(layers.length)
+      hidden, next_cache = MLX::DSL.run_stack(layers, hidden, mask: mask, cache: cache_state)
 
-      [norm.call(hidden), cache]
+      [norm.call(hidden), next_cache]
     end
   end
 

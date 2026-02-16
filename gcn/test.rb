@@ -3,7 +3,7 @@
 require "optparse"
 
 require_relative "main"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 19 }
   parser = OptionParser.new do |opts|
@@ -11,6 +11,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -36,14 +41,32 @@ if $PROGRAM_NAME == __FILE__
     h_dim: 16,
     out_dim: 7,
     nb_layers: 2,
-    dropout: 0.2,
+    dropout: benchmark_enabled ? 0.0 : 0.2,
     bias: true
   )
   raise "GCN missing DSL trainer helper" unless model.respond_to?(:trainer)
-
+  BenchmarkDeterministic.reinitialize_module!(model) if benchmark_enabled
   logits = model.call(x, adj)
   MLX::Core.eval(logits)
   raise "Forward shape mismatch: #{logits.shape.inspect}" unless logits.shape == [128, 7]
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "gcn",
+      inputs: { x: x, adj: adj },
+      outputs: { logits: logits },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   train_logits = GcnExample::Train.select_rows(logits, train_mask)
   train_labels = GcnExample::Train.select_rows(y, train_mask)

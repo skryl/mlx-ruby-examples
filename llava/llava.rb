@@ -6,6 +6,7 @@ require "pathname"
 
 
 require "mlx"
+require "mlx/dsl"
 
 require_relative "language"
 require_relative "vision"
@@ -14,43 +15,18 @@ module LlavaExample
   SCRIPT_DIR = Pathname.new(__dir__).join("python")
 
   class LlaVAConfig
-    attr_reader :text_config,
-                :vision_config,
-                :ignore_index,
-                :image_token_index,
-                :vision_feature_select_strategy,
-                :vision_feature_layer,
-                :vocab_size
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      text_config:,
-      vision_config:,
-      ignore_index: -100,
-      image_token_index: 32_000,
-      vision_feature_select_strategy: "default",
-      vision_feature_layer: -2,
-      vocab_size: 32_000
-    )
-      @text_config = text_config
-      @vision_config = vision_config
-      @ignore_index = ignore_index
-      @image_token_index = image_token_index
-      @vision_feature_select_strategy = vision_feature_select_strategy
-      @vision_feature_layer = vision_feature_layer
-      @vocab_size = vocab_size
-    end
+    field :text_config, [Hash, TextConfig], required: true
+    field :vision_config, [Hash, VisionConfig], required: true
+    field :ignore_index, Integer, default: -100
+    field :image_token_index, Integer, default: 32_000
+    field :vision_feature_select_strategy, String, default: "default"
+    field :vision_feature_layer, Integer, default: -2
+    field :vocab_size, Integer, default: 32_000
 
     def self.from_dict(params)
-      p = params.transform_keys(&:to_s)
-      new(
-        text_config: p.fetch("text_config"),
-        vision_config: p.fetch("vision_config"),
-        ignore_index: p.fetch("ignore_index", -100),
-        image_token_index: p.fetch("image_token_index", 32_000),
-        vision_feature_select_strategy: p.fetch("vision_feature_select_strategy", "default"),
-        vision_feature_layer: p.fetch("vision_feature_layer", -2),
-        vocab_size: p.fetch("vocab_size", 32_000)
-      )
+      from_hash(params)
     end
   end
 
@@ -141,12 +117,12 @@ module LlavaExample
               "The number of image tokens (#{image_positions.length}) does not match the number of image patches (#{num_image_patches})."
       end
 
-      merged = inputs_embeds.to_a
-      image_values = image_features.to_a
-      image_positions.each_with_index do |pos, patch_idx|
-        merged[0][pos] = image_values[0][patch_idx]
-      end
-      MLX::Core.array(merged, inputs_embeds.dtype)
+      MLX::DSL::Tensor.scatter_rows(
+        base: inputs_embeds,
+        row_indices: image_positions,
+        values: image_features,
+        axis: 1
+      )
     end
 
     def call(input_ids, pixel_values = nil, cache: nil)
@@ -188,10 +164,16 @@ module LlavaExample
         end
       end
 
+      weights = weight_mapper.apply(weights)
       weights = VisionModel.sanitize(weights)
       weights = LanguageModel.sanitize(weights)
       model.load_weights(weights.to_a, strict: false)
       model
+    end
+
+    def self.weight_mapper
+      @weight_mapper ||= MLX::DSL.weight_map do
+      end
     end
   end
 

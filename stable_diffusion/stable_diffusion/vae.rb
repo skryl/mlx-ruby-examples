@@ -21,10 +21,8 @@ module StableDiffusionExample
   end
 
   def downsample_stride(x, stride: 8)
-    h_idx = (0...x.shape[1]).step(stride).to_a
-    w_idx = (0...x.shape[2]).step(stride).to_a
-    h_idx = MLX::Core.array(h_idx, MLX::Core.int32)
-    w_idx = MLX::Core.array(w_idx, MLX::Core.int32)
+    h_idx = MLX::Core.arange(0, x.shape[1], stride, MLX::Core.int32)
+    w_idx = MLX::Core.arange(0, x.shape[2], stride, MLX::Core.int32)
     y = MLX::Core.take(x, h_idx, 1)
     MLX::Core.take(y, w_idx, 2)
   end

@@ -135,7 +135,7 @@ module SegmentAnything
     def call(x)
       x = patch_embed.call(x)
       x = MLX::Core.add(x, pos_embed) unless pos_embed.nil?
-      layers.each { |blk| x = blk.call(x) }
+      x = MLX::DSL.run_stack(layers, x)
       neck.call(x)
     end
   end

@@ -5,7 +5,7 @@ require "tmpdir"
 
 require_relative "encodec"
 require_relative "utils"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 0 }
 
@@ -14,6 +14,14 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  benchmark_device = ENV["MLX_BENCHMARK_DEVICE"].to_s.strip.downcase
+  # Encodec LSTM kernel path is GPU-only; keep CPU benchmark path comparable with python harness.
+  benchmark_num_lstm_layers = benchmark_enabled && benchmark_device == "cpu" ? 0 : 1
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -26,7 +34,7 @@ if $PROGRAM_NAME == __FILE__
     codebook_dim: 32,
     upsampling_ratios: [2, 2],
     target_bandwidths: [1.5, 3.0, 6.0],
-    num_lstm_layers: 1,
+    num_lstm_layers: benchmark_num_lstm_layers,
     num_residual_layers: 1,
     chunk_length_s: nil,
     overlap: nil,
@@ -37,7 +45,6 @@ if $PROGRAM_NAME == __FILE__
 
   audio = MLX::Core.random_uniform([1, 96, 2], -1.0, 1.0, MLX::Core.float32)
   mask = MLX::Core.ones([1, 96], MLX::Core.bool_)
-
   codes, scales = model.encode(audio, mask, bandwidth: 3.0)
   MLX::Core.eval(codes)
   scales.each { |s| MLX::Core.eval(s) unless s.nil? }
@@ -47,6 +54,24 @@ if $PROGRAM_NAME == __FILE__
   raise "Encoded codebook axis must be positive" unless codes.shape[2] > 0
   raise "Encoded frame axis must be positive" unless codes.shape[3] > 0
   raise "Expected scales for each frame" unless scales.length == 1
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "encodec",
+      inputs: { audio: audio, mask: mask },
+      outputs: { codes: codes, scales: scales },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   decoded = model.decode(codes, scales, mask)
   MLX::Core.eval(decoded)

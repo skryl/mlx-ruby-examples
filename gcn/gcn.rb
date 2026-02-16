@@ -2,6 +2,7 @@
 
 
 require "mlx"
+require "mlx/dsl"
 
 module GcnExample
   class GCNLayer < MLX::NN::Module
@@ -15,23 +16,32 @@ module GcnExample
     end
   end
 
-  class GCN < MLX::NN::Module
-    include MLX::DSL::ModelMixin
+  class GCN < MLX::DSL::Model
+    option :x_dim
+    option :h_dim
+    option :out_dim
+    option :nb_layers, default: 2
+    option :dropout, default: 0.5
+    option :bias, default: true
 
-    def initialize(x_dim:, h_dim:, out_dim:, nb_layers: 2, dropout: 0.5, bias: true)
-      super()
+    layer :gcn_stack do
       layer_sizes = [x_dim] + Array.new(nb_layers, h_dim) + [out_dim]
-      self.gcn_layers = layer_sizes.each_cons(2).map do |in_dim, out_dim_curr|
-        GCNLayer.new(in_dim, out_dim_curr, bias: bias)
-      end
-      self.dropout = MLX::NN::Dropout.new(dropout)
+      MLX::NN::Sequential.new(
+        *layer_sizes.each_cons(2).map { |in_dim, out_dim_curr| GCNLayer.new(in_dim, out_dim_curr, bias: bias) }
+      )
+    end
+
+    layer :dropout_layer, MLX::NN::Dropout, -> { dropout }
+
+    def gcn_layers
+      gcn_stack.layers
     end
 
     def call(x, adj)
       hidden = x
       gcn_layers[0...-1].each do |layer|
         hidden = MLX::NN.relu(layer.call(hidden, adj))
-        hidden = dropout.call(hidden)
+        hidden = dropout_layer.call(hidden)
       end
       gcn_layers[-1].call(hidden, adj)
     end

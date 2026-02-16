@@ -3,7 +3,7 @@
 require "optparse"
 
 require_relative "llava"
-
+require_relative "../benchmark/parity"
 module LlavaExample
   module TestHelpers
     module_function
@@ -28,6 +28,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -62,10 +67,10 @@ if $PROGRAM_NAME == __FILE__
   )
 
   model = LlavaExample::LlavaModel.new(config)
+  BenchmarkDeterministic.reinitialize_module!(model) if benchmark_enabled
 
   input_ids = MLX::Core.array([[1, 256, 256, 256, 256, 7, 8, 9]], MLX::Core.int32)
   pixel_values = MLX::Core.random_uniform([1, 3, 16, 16], 0.0, 1.0, MLX::Core.float32)
-
   logits, cache = model.call(input_ids, pixel_values)
   MLX::Core.eval(logits)
   unless logits.shape == [1, input_ids.shape[1], text_config.vocab_size]
@@ -73,6 +78,24 @@ if $PROGRAM_NAME == __FILE__
   end
   unless cache.length == text_config.num_hidden_layers
     raise "LLaVA cache length mismatch: expected #{text_config.num_hidden_layers}, got #{cache.length}"
+  end
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "llava",
+      inputs: { input_ids: input_ids, pixel_values: pixel_values },
+      outputs: { logits: logits },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
   end
 
   inputs_embeds = model.language_model.model.embed_tokens.call(input_ids)

@@ -3,7 +3,7 @@
 require "optparse"
 
 require_relative "main"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 29 }
   parser = OptionParser.new do |opts|
@@ -11,6 +11,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -42,10 +47,29 @@ if $PROGRAM_NAME == __FILE__
     emb_dropout: 0.0
   )
   raise "KWT missing DSL trainer helper" unless model.respond_to?(:trainer)
+  BenchmarkDeterministic.reinitialize_module!(model) if benchmark_enabled
   x = MLX::Core.normal([4, 98, 40, 1])
   y = model.call(x)
   MLX::Core.eval(y)
   raise "Forward shape mismatch (4D input): #{y.shape.inspect}" unless y.shape == [4, 12]
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "speechcommands",
+      inputs: { x: x },
+      outputs: { y: y },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   x3 = MLX::Core.normal([4, 98, 40])
   y3 = model.call(x3)

@@ -5,7 +5,7 @@ require "tmpdir"
 
 require_relative "clip"
 require_relative "linear_probe"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 67 }
   parser = OptionParser.new do |opts|
@@ -13,6 +13,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -43,6 +48,24 @@ if $PROGRAM_NAME == __FILE__
   raise "Image embeds shape mismatch" unless output["image_embeds"].shape == [2, 32]
   raise "Logits shape mismatch" unless output["logits_per_image"].shape == [2, 2]
   raise "Loss not finite" unless output["loss"].item.finite?
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "clip",
+      inputs: { input_ids: input_ids, pixel_values: proc },
+      outputs: { loss: output["loss"] },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   before = MLX::Core.array(model.vision_projection.weight.to_a, model.vision_projection.weight.dtype)
   optimizer = MLX::Optimizers::Adam.new(learning_rate: 1e-3)
