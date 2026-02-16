@@ -1,4 +1,4 @@
-# codex-examples
+# MLX Ruby Examples
 
 Ruby/MLX example ports that depend on Apple Metal when building the `mlx` gem.
 
