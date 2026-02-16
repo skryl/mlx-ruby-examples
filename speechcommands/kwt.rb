@@ -1,9 +1,8 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module SpeechcommandsExample
   class FeedForward < MLX::NN::Module
@@ -82,15 +81,13 @@ module SpeechcommandsExample
     end
 
     def call(x)
-      hidden = x
-      layers.each do |layer|
-        hidden = layer.call(hidden)
-      end
-      hidden
+      MLX::DSL.run_stack(layers, x)
     end
   end
 
   class KWT < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     attr_reader :num_patches, :dim
 
     def initialize(

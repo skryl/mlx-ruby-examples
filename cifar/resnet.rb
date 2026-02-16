@@ -2,10 +2,9 @@
 
 require "pathname"
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module CifarExample
   class ShortcutA < MLX::NN::Module
@@ -15,8 +14,8 @@ module CifarExample
     end
 
     def call(x)
-      h_indices = MLX::Core.array((0...x.shape[1]).step(2).to_a, MLX::Core.int32)
-      w_indices = MLX::Core.array((0...x.shape[2]).step(2).to_a, MLX::Core.int32)
+      h_indices = MLX::Core.arange(0, x.shape[1], 2, MLX::Core.int32)
+      w_indices = MLX::Core.arange(0, x.shape[2], 2, MLX::Core.int32)
       out = MLX::Core.take(x, h_indices, 1)
       out = MLX::Core.take(out, w_indices, 2)
       pad = @dims / 4
@@ -62,6 +61,8 @@ module CifarExample
   end
 
   class ResNet < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     def initialize(block_class, num_blocks, num_classes: 10)
       super()
       self.conv1 = MLX::NN::Conv2d.new(3, 16, 3, stride: 1, padding: 1, bias: false)
@@ -79,9 +80,7 @@ module CifarExample
 
     def call(x)
       x = MLX::NN.relu(bn1.call(conv1.call(x)))
-      x = layer1.call(x)
-      x = layer2.call(x)
-      x = layer3.call(x)
+      x = MLX::DSL.run_stack([layer1, layer2, layer3], x)
       x = MLX::Core.mean(x, 1)
       x = MLX::Core.mean(x, 1)
       linear.call(x)

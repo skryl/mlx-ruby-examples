@@ -39,6 +39,10 @@ ruby transformer_lm/main.rb \
 
 By default, this runs on CPU. Add `--gpu` to run on the Metal backend.
 
+## DSL Notes
+
+- `main.rb` uses DSL trainer orchestration for iteration scheduling/reporting while retaining custom LM batching/evaluation utilities.
+
 ## Test
 
 ```bash

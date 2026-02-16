@@ -52,15 +52,15 @@ module LoraExample
           indices = (0...dataset.length).to_a
           indices.shuffle!(random: rng) if train
 
-          i = 0
-          while i + batch_size <= indices.length
+          MLX::DSL::Data
+            .from(indices)
+            .batch(batch_size, drop_last: true)
+            .each do |index_batch|
             batch_tokens = []
-            batch_size.times do |j|
-              text = dataset[indices[i + j]]
+            index_batch.each do |idx|
+              text = dataset[idx]
               batch_tokens << tokenizer.encode(text.to_s)
             end
-            i += batch_size
-
             lengths = batch_tokens.map(&:length)
             max_len = lengths.max
             next if max_len.nil? || max_len < 2

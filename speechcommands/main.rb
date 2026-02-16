@@ -149,40 +149,84 @@ module SpeechcommandsExample
       )
 
       best_ckpt = options[:best_ckpt]
+      created_temp_checkpoint = false
       if best_ckpt.nil? || best_ckpt.empty?
         best_ckpt = File.join(Dir.tmpdir, "speechcommands_best_#{SecureRandom.hex(8)}.npz")
+        created_temp_checkpoint = true
       end
-      best_acc = -Float::INFINITY
-      best_epoch = 0
 
-      options[:epochs].times do |epoch|
-        tr_loss, tr_acc, tr_throughput = train_epoch(model, train_data, optimizer, epoch)
-        MLX::Core.eval(tr_loss, tr_acc, tr_throughput)
-        puts [
-          "Epoch: #{epoch}",
-          format("avg. Train loss %.3f", tr_loss.item.to_f),
-          format("avg. Train acc %.3f", tr_acc.item.to_f),
-          format("Throughput: %.2f samples/sec", tr_throughput.item.to_f)
-        ].join(" | ")
+      trainer = model.trainer(optimizer: optimizer) do |audio:, label:|
+        output = model.call(audio)
+        MLX::Core.mean(MLX::NN::Losses.cross_entropy(output, label))
+      end
+      trainer.artifact_policy(
+        checkpoint: {
+          path: best_ckpt,
+          strategy: :best
+        },
+        retention: { keep_last_n: 1 }
+      )
 
+      epoch_started_at = {}
+      trainer.before_epoch do |ctx|
+        epoch_started_at[ctx.fetch(:epoch)] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+      trainer.after_epoch do |ctx|
+        epoch = ctx.fetch(:epoch)
         val_acc, val_throughput = test_epoch(model, val_data)
         MLX::Core.eval(val_acc, val_throughput)
-        puts format(
-          "Epoch: %d | Val acc %.3f | Throughput: %.2f samples/sec",
-          epoch,
-          val_acc.item.to_f,
-          val_throughput.item.to_f
-        )
-
-        if val_acc.item.to_f >= best_acc
-          best_acc = val_acc.item.to_f
-          best_epoch = epoch
-          model.save_weights(best_ckpt)
-        end
+        puts [
+          "Epoch: #{epoch}",
+          format("Train loss %.3f", ctx.fetch(:epoch_loss).to_f),
+          format("Val loss %.3f", ctx.fetch(:val_loss).to_f),
+          format("Val acc %.3f", val_acc.item.to_f),
+          format("Val throughput %.2f samples/sec", val_throughput.item.to_f),
+          format(
+            "Time %.3fs",
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) - epoch_started_at.fetch(epoch, Process.clock_gettime(Process::CLOCK_MONOTONIC))
+          )
+        ].join(" | ")
       end
 
-      puts "Testing best model from epoch #{best_epoch}"
-      model.load_weights(best_ckpt) if File.exist?(best_ckpt)
+      train_source = lambda do |epoch:, **_kwargs|
+        _ = epoch
+        train_data.reset
+        train_data
+      end
+      val_source = lambda do |epoch:, **_kwargs|
+        _ = epoch
+        val_data.reset
+        val_data
+      end
+      trainer.register_dataflow(
+        :speech_cls,
+        train: { reduce: :mean },
+        validation: { reduce: :mean }
+      )
+      split_plan = MLX::DSL.splits do
+        train(train_source)
+        validation(val_source)
+      end
+
+      trainer.fit_report(
+        split_plan,
+        **trainer.use_dataflow(:speech_cls),
+        epochs: options[:epochs],
+        monitor: :val_loss,
+        monitor_mode: :min,
+        patience: options[:patience],
+        min_delta: options.fetch(:min_delta, 0.0),
+        keep_losses: false,
+        strict_data_reuse: true
+      )
+
+      best_epoch = nil
+      if File.exist?(best_ckpt)
+        payload = model.load_checkpoint(best_ckpt, optimizer: optimizer)
+        metadata = payload.is_a?(Hash) ? payload["metadata"] : nil
+        best_epoch = metadata["epoch"] if metadata.is_a?(Hash)
+      end
+      puts "Testing best model from epoch #{best_epoch.nil? ? 'n/a' : best_epoch}"
 
       test_data = Dataset.prepare_dataset(
         batch_size: options[:batch_size],
@@ -202,7 +246,7 @@ module SpeechcommandsExample
 
       model
     ensure
-      if !best_ckpt.nil? && best_ckpt.include?("speechcommands_best_") && File.exist?(best_ckpt)
+      if created_temp_checkpoint && !best_ckpt.nil? && File.exist?(best_ckpt)
         File.delete(best_ckpt)
       end
     end
@@ -227,7 +271,9 @@ if $PROGRAM_NAME == __FILE__
     train_samples: 8_000,
     val_samples: 1_000,
     test_samples: 1_000,
-    best_ckpt: nil
+    best_ckpt: nil,
+    patience: nil,
+    min_delta: 0.0
   }
 
   parser = OptionParser.new do |opts|
@@ -250,6 +296,8 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--val-samples N", Integer, "Synthetic validation split size") { |v| options[:val_samples] = v }
     opts.on("--test-samples N", Integer, "Synthetic test split size") { |v| options[:test_samples] = v }
     opts.on("--best-ckpt PATH", String, "Path for best checkpoint weights") { |v| options[:best_ckpt] = v }
+    opts.on("--patience N", Integer, "Early stopping patience on validation loss") { |v| options[:patience] = v }
+    opts.on("--min-delta N", Float, "Minimum validation-loss delta for improvement") { |v| options[:min_delta] = v }
   end
   parser.parse!
 

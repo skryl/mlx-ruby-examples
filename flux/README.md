@@ -51,3 +51,7 @@ ruby flux/dreambooth.rb \
 ```bash
 ruby flux/test.rb
 ```
+
+## DSL Notes
+
+- Dreambooth iteration in `dreambooth.rb` uses DSL data-pipeline iteration helpers for training-step traversal.

@@ -42,6 +42,14 @@ ruby speechcommands/main.rb \
   --batch-size 256
 ```
 
+## DSL Notes
+
+- `main.rb` now uses DSL trainer flows for monitoring, patience, and best-checkpoint handling.
+- Useful flags for DSL monitoring behavior:
+  - `--patience N`
+  - `--min-delta N`
+  - `--best-ckpt PATH`
+
 ## Test
 
 ```bash

@@ -7,39 +7,24 @@ require "pathname"
 require "time"
 
 ROOT = File.expand_path("../..", __dir__)
-DSL_LIB = File.join(ROOT, "codex-dsl", "lib")
-$LOAD_PATH.unshift(DSL_LIB) unless $LOAD_PATH.include?(DSL_LIB)
 
 require "mlx"
+require "mlx/dsl"
 
 module LlamaExample
   class ModelArgs
-    attr_reader :dim, :n_layers, :head_dim, :hidden_dim, :n_heads, :n_kv_heads, :norm_eps, :vocab_size, :rope_theta,
-                :rope_traditional
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      dim:,
-      n_layers:,
-      head_dim:,
-      hidden_dim:,
-      n_heads:,
-      n_kv_heads:,
-      norm_eps:,
-      vocab_size:,
-      rope_theta:,
-      rope_traditional: true
-    )
-      @dim = dim
-      @n_layers = n_layers
-      @head_dim = head_dim
-      @hidden_dim = hidden_dim
-      @n_heads = n_heads
-      @n_kv_heads = n_kv_heads
-      @norm_eps = norm_eps
-      @vocab_size = vocab_size
-      @rope_theta = rope_theta
-      @rope_traditional = rope_traditional
-    end
+    field :dim, Integer, required: true
+    field :n_layers, Integer, required: true
+    field :head_dim, Integer, required: true
+    field :hidden_dim, Integer, required: true
+    field :n_heads, Integer, required: true
+    field :n_kv_heads, Integer, required: true
+    field :norm_eps, [Integer, Float], required: true
+    field :vocab_size, Integer, required: true
+    field :rope_theta, [Integer, Float], required: true
+    field :rope_traditional, [TrueClass, FalseClass], default: true
   end
 
   class SentencePieceTokenizer
@@ -175,7 +160,8 @@ module LlamaExample
       residual, next_cache = attention.call(attention_norm.call(x), mask: mask, cache: cache)
       hidden = MLX::Core.add(x, residual)
       residual = feed_forward.call(ffn_norm.call(hidden))
-      [MLX::Core.add(hidden, residual), next_cache]
+      output = MLX::Core.add(hidden, residual)
+      [output, next_cache]
     end
   end
 
@@ -189,46 +175,36 @@ module LlamaExample
       self.output = MLX::NN::Linear.new(args.dim, args.vocab_size, bias: false)
     end
 
-    def call(x)
-      mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(x.shape[1])
-      mask = mask.astype(tok_embeddings.weight.dtype)
+    def call(x, cache: :__dsl_no_cache__)
       hidden = tok_embeddings.call(x)
-      layers.each do |layer|
-        hidden, = layer.call(hidden, mask: mask)
+
+      use_cache = cache != :__dsl_no_cache__
+      offset = use_cache ? MLX::DSL::Positions.offset_from_cache(cache, layer: 0) : 0
+      mask = nil
+      if hidden.shape[1] > 1 || offset.positive?
+        mask = MLX::DSL::Masks.causal(length: hidden.shape[1], offset: offset, dtype: hidden.dtype)
       end
-      output.call(norm.call(hidden))
+
+      if use_cache
+        cache_state = cache || Array.new(layers.length)
+        hidden, next_cache = MLX::DSL.run_stack(layers, hidden, mask: mask, cache: cache_state)
+        [output.call(norm.call(hidden)), next_cache]
+      else
+        hidden, = MLX::DSL.run_stack(layers, hidden, mask: mask, cache: Array.new(layers.length))
+        output.call(norm.call(hidden))
+      end
     end
 
     def generate(x, temp: 1.0)
-      sample = lambda do |logits|
-        if temp.to_f.zero?
-          MLX::Core.argmax(logits, -1)
-        else
-          MLX::Core.categorical(MLX::Core.multiply(logits, 1.0 / temp.to_f))
-        end
+      sampler = if temp.to_f.zero?
+        { strategy: :argmax }
+      else
+        { strategy: :temperature, temperature: temp.to_f }
       end
-
+      generator = MLX::DSL::Generate.new(model: self, sampler: sampler, mode: :decoder_only)
       Enumerator.new do |emitter|
-        cache = []
-        mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(x.shape[1])
-        mask = mask.astype(tok_embeddings.weight.dtype)
-        hidden = tok_embeddings.call(x)
-        layers.each do |layer|
-          hidden, layer_cache = layer.call(hidden, mask: mask)
-          cache << layer_cache
-        end
-        hidden = norm.call(hidden)
-        y = sample.call(output.call(last_token(hidden)))
-        emitter << y
-
-        loop do
-          hidden = tok_embeddings.call(MLX::Core.expand_dims(y, 1))
-          cache.each_index do |i|
-            hidden, cache[i] = layers[i].call(hidden, cache: cache[i])
-          end
-          hidden = norm.call(hidden)
-          y = sample.call(output.call(last_token(hidden)))
-          emitter << y
+        generator.each_token(input_ids: x, max_tokens: 1_000_000) do |token_id, _chunk|
+          emitter << MLX::Core.array(token_id, MLX::Core.int32)
         end
       end
     end
@@ -270,7 +246,7 @@ module LlamaExample
     config = sanitize_config(JSON.parse(File.binread(config_path)), weights)
     quantization = config.delete("quantization")
 
-    args = ModelArgs.new(
+    args = ModelArgs.from_hash(
       dim: config.fetch("dim"),
       n_layers: config.fetch("n_layers"),
       head_dim: config.fetch("head_dim"),

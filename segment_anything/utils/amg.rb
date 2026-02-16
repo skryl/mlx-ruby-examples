@@ -2,8 +2,6 @@
 
 require "json"
 
-dsl_lib = File.join(File.expand_path("../..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
 

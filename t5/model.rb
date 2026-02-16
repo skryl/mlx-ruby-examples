@@ -5,44 +5,29 @@ require "open3"
 require "pathname"
 
 ROOT = File.expand_path("..", __dir__)
-DSL_LIB = File.join(ROOT, "codex-dsl", "lib")
-$LOAD_PATH.unshift(DSL_LIB) unless $LOAD_PATH.include?(DSL_LIB)
 
 require "mlx"
+require "mlx/dsl"
 
 module T5Example
   SCRIPT_DIR = Pathname.new(__dir__).join("python")
 
   class T5Config
-    attr_reader :d_model,
-                :d_kv,
-                :d_ff,
-                :num_heads,
-                :num_layers,
-                :num_decoder_layers,
-                :layer_norm_epsilon,
-                :relative_attention_num_buckets,
-                :relative_attention_max_distance,
-                :feed_forward_proj,
-                :tie_word_embeddings,
-                :vocab_size,
-                :decoder_start_token_id
+    include MLX::DSL::ConfigSchema
 
-    def initialize(config)
-      @d_model = config.fetch("d_model")
-      @d_kv = config.fetch("d_kv")
-      @d_ff = config["d_ff"]
-      @num_heads = config.fetch("num_heads")
-      @num_layers = config.fetch("num_layers")
-      @num_decoder_layers = config["num_decoder_layers"] || @num_layers
-      @layer_norm_epsilon = config.fetch("layer_norm_epsilon")
-      @relative_attention_num_buckets = config.fetch("relative_attention_num_buckets")
-      @relative_attention_max_distance = config.fetch("relative_attention_max_distance")
-      @feed_forward_proj = config.fetch("feed_forward_proj")
-      @tie_word_embeddings = config.fetch("tie_word_embeddings")
-      @vocab_size = config.fetch("vocab_size")
-      @decoder_start_token_id = config.fetch("decoder_start_token_id")
-    end
+    field :d_model, Integer, required: true
+    field :d_kv, Integer, required: true
+    field :d_ff, [Integer, NilClass], default: nil
+    field :num_heads, Integer, required: true
+    field :num_layers, Integer, required: true
+    field :num_decoder_layers, Integer, default: ->(cfg) { cfg.num_layers }
+    field :layer_norm_epsilon, [Integer, Float], required: true
+    field :relative_attention_num_buckets, Integer, required: true
+    field :relative_attention_max_distance, Integer, required: true
+    field :feed_forward_proj, String, required: true
+    field :tie_word_embeddings, [TrueClass, FalseClass], required: true
+    field :vocab_size, Integer, required: true
+    field :decoder_start_token_id, Integer, required: true
   end
 
   class Tokenizer
@@ -94,7 +79,7 @@ module T5Example
       raise RuntimeError, "Failed to load T5 config for #{model_name}: #{stderr}"
     end
 
-    T5Config.new(JSON.parse(stdout))
+    T5Config.from_hash(JSON.parse(stdout))
   end
 
   def load_model(
@@ -156,16 +141,7 @@ module T5Example
   end
 
   def create_additive_causal_mask(n, offset: 0)
-    rinds = MLX::Core.arange(0, offset + n, 1)
-    linds = if offset.zero?
-      rinds
-    else
-      MLX::Core.arange(offset, offset + n, 1)
-    end
-    lhs = MLX::Core.expand_dims(linds, 1)
-    rhs = MLX::Core.expand_dims(rinds, 0)
-    mask = MLX::Core.less(lhs, rhs).astype(MLX::Core.float32)
-    MLX::Core.multiply(mask, -1e9)
+    MLX::DSL::Masks.causal(length: n, offset: offset, dtype: MLX::Core.float32)
   end
 
   class RelativePositionBias < MLX::NN::Module
@@ -288,7 +264,8 @@ module T5Example
       self.dense = DenseActivation.new(config)
     end
 
-    def call(x, mask)
+    def call(x, mask = nil, **kwargs)
+      mask = kwargs[:mask] if kwargs.key?(:mask)
       y = ln1.call(x)
       y, = attention.call(y, y, y, mask: mask)
       x = MLX::Core.add(x, y)
@@ -309,9 +286,7 @@ module T5Example
 
     def call(x)
       pos_bias = relative_attention_bias.call(x.shape[1], x.shape[1])
-      layers.each do |layer|
-        x = layer.call(x, pos_bias)
-      end
+      x = MLX::DSL.run_stack(layers, x, mask: pos_bias)
       ln.call(x)
     end
   end
@@ -327,7 +302,7 @@ module T5Example
       self.dense = DenseActivation.new(config)
     end
 
-    def call(x, memory, mask, memory_mask, cache: nil)
+    def call(x, memory:, mask:, memory_mask: nil, cache: nil)
       y = ln1.call(x)
       y, new_cache = self_attention.call(y, y, y, mask: mask, cache: cache)
       x = MLX::Core.add(x, y)
@@ -352,12 +327,8 @@ module T5Example
     end
 
     def call(x, memory, cache: nil)
-      cache ||= Array.new(layers.length)
-      offset = if !cache[0].nil?
-        cache[0][0].shape[2]
-      else
-        0
-      end
+      cache_state = cache || MLX::DSL::KVCache.new(num_layers: layers.length)
+      offset = MLX::DSL::Positions.offset_from_cache(cache_state, layer: 0)
 
       t = x.shape[1]
       mask = if t > 1
@@ -373,10 +344,15 @@ module T5Example
         MLX::Core.add(mask, pos_bias)
       end
 
-      layers.each_with_index do |layer, e|
-        x, cache[e] = layer.call(x, memory, mask, nil, cache: cache[e])
-      end
-      [ln.call(x), cache]
+      x, next_cache = MLX::DSL.run_stack(
+        layers,
+        x,
+        memory: memory,
+        mask: mask,
+        memory_mask: nil,
+        cache: cache_state
+      )
+      [ln.call(x), next_cache]
     end
   end
 
@@ -429,6 +405,19 @@ module T5Example
 
     def truncate_cache(num_to_truncate)
       return if num_to_truncate <= 0
+      return if cache.nil?
+
+      if cache.respond_to?(:truncate!)
+        cache_length = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
+        return if cache_length.zero?
+
+        if num_to_truncate >= cache_length
+          reset_cache
+        else
+          cache.truncate!(tokens: cache_length - num_to_truncate)
+        end
+        return
+      end
       return if cache[0].nil?
 
       cache_length = cache[0][0].shape[2]
@@ -438,7 +427,7 @@ module T5Example
       end
 
       keep = cache_length - num_to_truncate
-      indices = MLX::Core.array((0...keep).to_a, MLX::Core.int32)
+      indices = MLX::Core.arange(0, keep, 1, MLX::Core.int32)
       self.cache = cache.map do |layer_cache|
         next nil if layer_cache.nil?
 
@@ -462,28 +451,20 @@ module T5Example
   end
 
   def generate(prompt_ids, model, decoder_start_id:, temp: 0.0)
-    sample = lambda do |logits|
-      if temp.to_f.zero?
-        MLX::Core.argmax(logits, -1)
-      else
-        MLX::Core.categorical(MLX::Core.multiply(logits, 1.0 / temp.to_f))
-      end
+    sampler = if temp.to_f.zero?
+      { strategy: :argmax }
+    else
+      { strategy: :temperature, temperature: temp.to_f }
     end
-
-    prompt = prompt_ids
-    prompt = MLX::Core.expand_dims(prompt, 0) if prompt.ndim == 1
-    memory = model.encode(prompt)
-    cache = nil
-    y = MLX::Core.array([decoder_start_id], MLX::Core.int32)
-
+    generator = MLX::DSL::Generate.new(
+      model: model,
+      sampler: sampler,
+      mode: :encoder_decoder,
+      decoder_start_id: decoder_start_id
+    )
     Enumerator.new do |enum|
-      loop do
-        logits, cache = model.decode(MLX::Core.expand_dims(y, 0), memory, cache: cache)
-        last_idx = MLX::Core.array([logits.shape[1] - 1], MLX::Core.int32)
-        last = MLX::Core.take(logits, last_idx, 1)
-        last = MLX::Core.squeeze(last, 1)
-        y = sample.call(last)
-        enum << MLX::Core.squeeze(y)
+      generator.each_token(input_ids: prompt_ids, max_tokens: 1_000_000) do |token_id, _chunk|
+        enum << MLX::Core.array(token_id, MLX::Core.int32)
       end
     end
   end

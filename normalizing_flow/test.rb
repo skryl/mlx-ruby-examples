@@ -4,7 +4,7 @@ require "optparse"
 require "tmpdir"
 
 require_relative "main"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 31 }
   parser = OptionParser.new do |opts|
@@ -12,6 +12,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -36,10 +41,29 @@ if $PROGRAM_NAME == __FILE__
   raise "Affine inverse mismatch: #{max_err.item}" if max_err.item > 1e-4
 
   model = NormalizingFlowExample::RealNVP.new(4, 2, 32, 2)
+  raise "RealNVP missing DSL trainer helper" unless model.respond_to?(:trainer)
   batch = MLX::Core.random_uniform([16, 2], -2.0, 2.0, MLX::Core.float32)
   log_density = model.log_prob(batch)
   MLX::Core.eval(log_density)
   raise "RealNVP log_prob shape mismatch" unless log_density.shape == [16]
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "normalizing_flow",
+      inputs: { batch: batch },
+      outputs: { log_density: log_density },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   optimizer = MLX::Optimizers::Adam.new(learning_rate: 1e-3)
   loss_and_grad_fn = MLX::NN.value_and_grad(

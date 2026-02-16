@@ -1,0 +1,1 @@
+../../stable_diffusion/txt2image.rb

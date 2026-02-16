@@ -4,7 +4,7 @@ require "optparse"
 require "tmpdir"
 
 require_relative "main"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 13 }
   parser = OptionParser.new do |opts|
@@ -12,6 +12,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -37,6 +42,24 @@ if $PROGRAM_NAME == __FILE__
   raise "Reconstruction shape mismatch" unless x_recon.shape == [8, 64, 64, 1]
   raise "Mu shape mismatch" unless mu.shape == [8, 4]
   raise "Logvar shape mismatch" unless logvar.shape == [8, 4]
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "cvae",
+      inputs: { x: train_batch.fetch("image") },
+      outputs: { out: [x_recon, mu, logvar] },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   loss = CvaeExample::Train.loss_fn(model, train_batch.fetch("image"))
   MLX::Core.eval(loss)

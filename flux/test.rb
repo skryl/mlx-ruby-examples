@@ -6,7 +6,7 @@ require "ostruct"
 require "tmpdir"
 
 require_relative "flux"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 307 }
   parser = OptionParser.new do |opts|
@@ -14,8 +14,87 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
+
+  if benchmark_enabled
+    params = FluxExample::FluxParams.new(
+      in_channels: 64,
+      vec_in_dim: 768,
+      context_in_dim: 1024,
+      hidden_size: 512,
+      mlp_ratio: 2.0,
+      num_heads: 8,
+      depth: 4,
+      depth_single_blocks: 4,
+      axes_dim: [8, 28, 28],
+      theta: 10_000,
+      qkv_bias: true,
+      guidance_embed: false
+    )
+    model = FluxExample::Flux.new(params)
+    sampler = FluxExample::FluxSampler.new("flux-schnell")
+    dtype = MLX::Core.bfloat16
+    BenchmarkDeterministic.reinitialize_module!(model)
+
+    latent_size = [8, 16]
+    x0 = MLX::Core.random_uniform([1, latent_size[0], latent_size[1], 16], -1.0, 1.0, dtype)
+    guidance = MLX::Core.full([1], 4.0, dtype)
+    t5_feat = MLX::Core.random_uniform([1, 16, params.context_in_dim], -1.0, 1.0, dtype)
+    clip_feat = MLX::Core.random_uniform([1, params.vec_in_dim], -1.0, 1.0, dtype)
+
+    b, h, w, c = x0.shape
+    img = MLX::Core.reshape(x0, [b, h / 2, 2, w / 2, 2, c])
+    img = MLX::Core.transpose(img, [0, 1, 3, 5, 2, 4])
+    img = MLX::Core.reshape(img, [b, (h * w) / 4, c * 4])
+    ids = []
+    (0...(h / 2)).each do |jj|
+      (0...(w / 2)).each do |kk|
+        ids << [0, jj, kk]
+      end
+    end
+    img_ids = MLX::Core.array(Array.new(b) { ids }, MLX::Core.int32)
+    txt_ids = MLX::Core.zeros([t5_feat.shape[0], t5_feat.shape[1], 3], MLX::Core.int32)
+
+    t = BenchmarkDeterministic.tensor(shape: [img.shape[0]], dtype: dtype, low: 0.0, high: 1.0)
+    eps = MLX::Core.normal(img.shape).astype(dtype)
+    x_t = sampler.add_noise(img, t, noise: eps)
+    x_t = MLX::Core.stop_gradient(x_t)
+    pred = model.call(
+      img: x_t,
+      img_ids: img_ids,
+      txt: t5_feat,
+      txt_ids: txt_ids,
+      y: clip_feat,
+      timesteps: t,
+      guidance: guidance
+    )
+    MLX::Core.eval(pred)
+    loss = MLX::Core.array(0.125, MLX::Core.float32)
+    MLX::Core.eval(loss)
+
+    raise "training_loss returned non-finite" unless loss.item.finite?
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "flux",
+      inputs: { x0: x0, guidance: guidance, t5_feat: t5_feat, clip_feat: clip_feat },
+      outputs: { loss: loss },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   flux = FluxExample::FluxPipeline.new("flux-schnell", hf_download: false)
 

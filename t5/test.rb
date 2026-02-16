@@ -3,7 +3,7 @@
 require "optparse"
 
 require_relative "model"
-
+require_relative "../benchmark/parity"
 module T5Example
   module TestHelpers
     module_function
@@ -45,6 +45,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--atol N", Float, "Absolute tolerance") { |v| options[:atol] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -65,13 +70,31 @@ if $PROGRAM_NAME == __FILE__
   )
 
   model = T5Example::Model.new(config)
+  BenchmarkDeterministic.reinitialize_module!(model) if benchmark_enabled
   inputs = MLX::Core.array([[1, 2, 3, 4, 5, 6]], MLX::Core.int32)
   decoder_inputs = MLX::Core.array([[0, 7, 8]], MLX::Core.int32)
-
   output = model.call(inputs, decoder_inputs)
   MLX::Core.eval(output)
   unless output.shape == [1, decoder_inputs.shape[1], config.vocab_size]
     raise "Forward shape mismatch: expected [1, #{decoder_inputs.shape[1]}, #{config.vocab_size}], got #{output.shape.inspect}"
+  end
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "t5",
+      inputs: { inputs: inputs, decoder_inputs: decoder_inputs },
+      outputs: { output: output },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
   end
 
   memory = model.encode(inputs)

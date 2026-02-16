@@ -5,10 +5,9 @@ require "open3"
 require "pathname"
 
 # Ensure local DSL extensions are on the load path when running from repository root.
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module EncodecExample
   SNAPSHOT_SCRIPT = Pathname.new(__dir__).join("python", "snapshot_download.py").to_s
@@ -31,10 +30,10 @@ module EncodecExample
     def strided_take(x, stride)
       return x if stride <= 1
 
-      idx = (0...x.shape[1]).step(stride).to_a
-      return x if idx.empty?
+      idx = MLX::Core.arange(0, x.shape[1], stride, MLX::Core.int32)
+      return x if idx.shape[0].zero?
 
-      MLX::Core.take(x, MLX::Core.array(idx, MLX::Core.int32), 1)
+      MLX::Core.take(x, idx, 1)
     end
 
     def repeat_along_time(x, repeats)
@@ -54,135 +53,34 @@ module EncodecExample
   end
 
   class EncodecConfig
-    attr_reader :use_causal_conv,
-                :pad_mode,
-                :norm_type,
-                :trim_right_ratio,
-                :num_lstm_layers,
-                :residual_kernel_size,
-                :compress,
-                :use_conv_shortcut,
-                :audio_channels,
-                :num_filters,
-                :kernel_size,
-                :upsampling_ratios,
-                :num_residual_layers,
-                :dilation_growth_rate,
-                :hidden_size,
-                :last_kernel_size,
-                :codebook_size,
-                :codebook_dim,
-                :sampling_rate,
-                :target_bandwidths,
-                :chunk_length_s,
-                :overlap,
-                :normalize
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      use_causal_conv: true,
-      pad_mode: "reflect",
-      norm_type: "weight_norm",
-      trim_right_ratio: 1.0,
-      num_lstm_layers: 2,
-      residual_kernel_size: 3,
-      compress: 2,
-      use_conv_shortcut: true,
-      audio_channels: 2,
-      num_filters: 32,
-      kernel_size: 7,
-      upsampling_ratios: [8, 5, 4, 2],
-      num_residual_layers: 1,
-      dilation_growth_rate: 2,
-      hidden_size: 128,
-      last_kernel_size: 7,
-      codebook_size: 1024,
-      codebook_dim: 128,
-      sampling_rate: 48_000,
-      target_bandwidths: [1.5, 3.0, 6.0, 12.0],
-      chunk_length_s: nil,
-      overlap: nil,
-      normalize: true
-    )
-      @use_causal_conv = use_causal_conv
-      @pad_mode = pad_mode
-      @norm_type = norm_type
-      @trim_right_ratio = trim_right_ratio
-      @num_lstm_layers = num_lstm_layers
-      @residual_kernel_size = residual_kernel_size
-      @compress = compress
-      @use_conv_shortcut = use_conv_shortcut
-      @audio_channels = audio_channels
-      @num_filters = num_filters
-      @kernel_size = kernel_size
-      @upsampling_ratios = upsampling_ratios
-      @num_residual_layers = num_residual_layers
-      @dilation_growth_rate = dilation_growth_rate
-      @hidden_size = hidden_size
-      @last_kernel_size = last_kernel_size
-      @codebook_size = codebook_size
-      @codebook_dim = codebook_dim
-      @sampling_rate = sampling_rate
-      @target_bandwidths = target_bandwidths
-      @chunk_length_s = chunk_length_s
-      @overlap = overlap
-      @normalize = normalize
-    end
+    field :use_causal_conv, [TrueClass, FalseClass], default: true
+    field :pad_mode, String, default: "reflect"
+    field :norm_type, String, default: "weight_norm"
+    field :trim_right_ratio, [Integer, Float], default: 1.0
+    field :num_lstm_layers, Integer, default: 2
+    field :residual_kernel_size, Integer, default: 3
+    field :compress, Integer, default: 2
+    field :use_conv_shortcut, [TrueClass, FalseClass], default: true
+    field :audio_channels, Integer, default: 2
+    field :num_filters, Integer, default: 32
+    field :kernel_size, Integer, default: 7
+    field :upsampling_ratios, Array, default: [8, 5, 4, 2]
+    field :num_residual_layers, Integer, default: 1
+    field :dilation_growth_rate, Integer, default: 2
+    field :hidden_size, Integer, default: 128
+    field :last_kernel_size, Integer, default: 7
+    field :codebook_size, Integer, default: 1024
+    field :codebook_dim, Integer, default: ->(cfg) { cfg.hidden_size }
+    field :sampling_rate, Integer, default: 48_000
+    field :target_bandwidths, Array, default: [1.5, 3.0, 6.0, 12.0]
+    field :chunk_length_s, [Integer, Float, NilClass], default: nil
+    field :overlap, [Integer, Float, NilClass], default: nil
+    field :normalize, [TrueClass, FalseClass], default: true
 
     def self.from_hash(raw)
-      data = raw.transform_keys(&:to_s)
-      new(
-        use_causal_conv: data.fetch("use_causal_conv", true),
-        pad_mode: data.fetch("pad_mode", "reflect"),
-        norm_type: data.fetch("norm_type", "weight_norm"),
-        trim_right_ratio: data.fetch("trim_right_ratio", 1.0),
-        num_lstm_layers: data.fetch("num_lstm_layers", 2),
-        residual_kernel_size: data.fetch("residual_kernel_size", 3),
-        compress: data.fetch("compress", 2),
-        use_conv_shortcut: data.fetch("use_conv_shortcut", true),
-        audio_channels: data.fetch("audio_channels", 2),
-        num_filters: data.fetch("num_filters", 32),
-        kernel_size: data.fetch("kernel_size", 7),
-        upsampling_ratios: data.fetch("upsampling_ratios", [8, 5, 4, 2]),
-        num_residual_layers: data.fetch("num_residual_layers", 1),
-        dilation_growth_rate: data.fetch("dilation_growth_rate", 2),
-        hidden_size: data.fetch("hidden_size", 128),
-        last_kernel_size: data.fetch("last_kernel_size", 7),
-        codebook_size: data.fetch("codebook_size", 1024),
-        codebook_dim: data.fetch("codebook_dim", data.fetch("hidden_size", 128)),
-        sampling_rate: data.fetch("sampling_rate", 48_000),
-        target_bandwidths: data.fetch("target_bandwidths", [1.5, 3.0, 6.0, 12.0]),
-        chunk_length_s: data["chunk_length_s"],
-        overlap: data["overlap"],
-        normalize: data.fetch("normalize", true)
-      )
-    end
-
-    def to_h
-      {
-        "use_causal_conv" => use_causal_conv,
-        "pad_mode" => pad_mode,
-        "norm_type" => norm_type,
-        "trim_right_ratio" => trim_right_ratio,
-        "num_lstm_layers" => num_lstm_layers,
-        "residual_kernel_size" => residual_kernel_size,
-        "compress" => compress,
-        "use_conv_shortcut" => use_conv_shortcut,
-        "audio_channels" => audio_channels,
-        "num_filters" => num_filters,
-        "kernel_size" => kernel_size,
-        "upsampling_ratios" => upsampling_ratios,
-        "num_residual_layers" => num_residual_layers,
-        "dilation_growth_rate" => dilation_growth_rate,
-        "hidden_size" => hidden_size,
-        "last_kernel_size" => last_kernel_size,
-        "codebook_size" => codebook_size,
-        "codebook_dim" => codebook_dim,
-        "sampling_rate" => sampling_rate,
-        "target_bandwidths" => target_bandwidths,
-        "chunk_length_s" => chunk_length_s,
-        "overlap" => overlap,
-        "normalize" => normalize
-      }
+      super
     end
   end
 
@@ -279,9 +177,7 @@ module EncodecExample
 
     def call(hidden_states)
       x = hidden_states
-      layers.each do |lstm|
-        x = lstm.call(x)
-      end
+      x = MLX::DSL.run_stack(layers, x)
       MLX::Core.add(x, hidden_states)
     end
   end
@@ -336,9 +232,7 @@ module EncodecExample
     end
 
     def call(hidden_states)
-      x = hidden_states
-      layers.each { |layer| x = layer.call(x) }
-      x
+      MLX::DSL.run_stack(layers, hidden_states)
     end
   end
 
@@ -373,9 +267,7 @@ module EncodecExample
     end
 
     def call(hidden_states)
-      x = hidden_states
-      layers.each { |layer| x = layer.call(x) }
-      x
+      MLX::DSL.run_stack(layers, hidden_states)
     end
   end
 
@@ -663,8 +555,11 @@ module EncodecExample
     end
 
     def self.sanitize(weights)
-      weights.each_with_object({}) do |(k, v), out|
-        out[k.to_s] = v
+      weight_mapper.apply(weights)
+    end
+
+    def self.weight_mapper
+      @weight_mapper ||= MLX::DSL.weight_map do
       end
     end
 

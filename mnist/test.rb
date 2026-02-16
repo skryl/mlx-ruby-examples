@@ -3,7 +3,7 @@
 require "optparse"
 
 require_relative "main"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 11 }
   parser = OptionParser.new do |opts|
@@ -11,6 +11,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
   rng = Random.new(options[:seed])
@@ -26,13 +31,34 @@ if $PROGRAM_NAME == __FILE__
   raise "Test label shape mismatch" unless test_y.shape == [32]
 
   model = MnistExample::MLP.new(num_layers: 2, input_dim: 784, hidden_dim: 32, output_dim: 10)
+  raise "MLP missing DSL trainer helper" unless model.respond_to?(:trainer)
+  unless model.respond_to?(:save_checkpoint) && model.respond_to?(:load_checkpoint)
+    raise "MLP missing DSL checkpoint helpers"
+  end
   ids = MLX::Core.array((0...16).to_a, MLX::Core.int32)
   sample_x = MLX::Core.take(train_x, ids, 0)
   sample_y = MLX::Core.take(train_y, ids, 0)
-
   logits = model.call(sample_x)
   MLX::Core.eval(logits)
   raise "Forward shape mismatch: #{logits.shape.inspect}" unless logits.shape == [16, 10]
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "mnist",
+      inputs: { sample_x: sample_x },
+      outputs: { logits: logits },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
+  end
 
   optimizer = MLX::Optimizers::SGD.new(learning_rate: 0.1)
   loss_and_grad_fn = MLX::NN.value_and_grad(

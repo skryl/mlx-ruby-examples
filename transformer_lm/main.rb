@@ -7,6 +7,8 @@ require_relative "datasets"
 
 module TransformerLmExample
   class TransformerLM < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     def initialize(vocab_size:, num_layers:, dims:, num_heads:, checkpoint:)
       super()
       self.embedding = MLX::NN::Embedding.new(vocab_size, dims)
@@ -23,7 +25,7 @@ module TransformerLmExample
 
     def call(x)
       length = x.shape[1]
-      mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(length)
+      mask = MLX::DSL::Masks.causal(length: length, dtype: MLX::Core.float32)
       hidden = embedding.call(x)
       hidden = MLX::Core.add(hidden, pe.call(MLX::Core.arange(0, length, 1)))
       hidden = transformer.call(hidden, mask)
@@ -67,7 +69,7 @@ module TransformerLmExample
 
       Enumerator.new do |enum|
         loop do
-          order = (0...inputs.shape[0]).to_a
+          order = Array.new(inputs.shape[0]) { |i| i }
           order.shuffle!(random: rng)
           order.each_slice(batch_size) do |batch_ids|
             ids = MLX::Core.array(batch_ids, MLX::Core.int32)
@@ -135,7 +137,9 @@ module TransformerLmExample
         learning_rate: options[:learning_rate],
         weight_decay: options[:weight_decay]
       )
-      loss_and_grad_fn = MLX::NN.value_and_grad(model, ->(inputs) { loss_fn(model, inputs) })
+      trainer = model.trainer(optimizer: optimizer) do |inputs:|
+        loss_fn(model, inputs)
+      end
 
       train_iterator = iterate_batches(
         options[:batch_size],
@@ -143,29 +147,33 @@ module TransformerLmExample
         train,
         seed: options[:seed]
       )
+      train_source = lambda do |epoch:, **_kwargs|
+        _ = epoch
+        [{ inputs: train_iterator.next }]
+      end
 
-      losses = []
-      tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      options[:num_iters].times do |it|
+      trainer.before_epoch do |ctx|
+        it = ctx.fetch(:epoch).to_i
         warmup = if options[:lr_warmup] <= 0
           1.0
         else
           [1.0, it.to_f / options[:lr_warmup].to_f].min
         end
         optimizer.learning_rate = warmup * options[:learning_rate]
+      end
 
-        inputs = train_iterator.next
-        loss, grads = loss_and_grad_fn.call(inputs)
-        optimizer.update(model, grads)
-        MLX::Core.eval(loss, model.parameters, optimizer.state)
-        losses << loss.item.to_f
+      losses = []
+      tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      trainer.after_epoch do |ctx|
+        it = ctx.fetch(:epoch).to_i + 1
+        losses << ctx.fetch(:epoch_loss).to_f
 
-        if ((it + 1) % options[:steps_per_report]).zero?
+        if (it % options[:steps_per_report]).zero?
           toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           train_loss = losses.sum / [losses.length, 1].max.to_f
           puts format(
             "Iter %d: Train loss %.3f, It/sec %.3f",
-            it + 1,
+            it,
             train_loss,
             options[:steps_per_report] / [toc - tic, 1e-9].max
           )
@@ -173,7 +181,7 @@ module TransformerLmExample
           tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
 
-        next unless ((it + 1) % options[:steps_per_eval]).zero?
+        next unless (it % options[:steps_per_eval]).zero?
 
         eval_tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         val_loss = eval_fn(
@@ -186,12 +194,25 @@ module TransformerLmExample
         val_ppl = Math.exp(val_loss)
         puts format(
           "Iter %d: Val loss %.3f, Val ppl %.3f, Val took %.3fs",
-          it + 1,
+          it,
           val_loss,
           val_ppl,
           eval_toc - eval_tic
         )
       end
+      trainer.register_dataflow(:lm_train, train: { reduce: :mean })
+      split_plan = MLX::DSL.splits do
+        train(train_source)
+      end
+
+      trainer.fit_report(
+        split_plan,
+        **trainer.use_dataflow(:lm_train),
+        epochs: options[:num_iters],
+        monitor: :epoch_loss,
+        monitor_mode: :min,
+        keep_losses: false
+      )
 
       if options[:eval_test]
         test_loss = eval_fn(

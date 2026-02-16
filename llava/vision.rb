@@ -1,65 +1,27 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module LlavaExample
   class VisionConfig
-    attr_reader :model_type,
-                :num_hidden_layers,
-                :hidden_size,
-                :intermediate_size,
-                :num_attention_heads,
-                :image_size,
-                :patch_size,
-                :projection_dim,
-                :vocab_size,
-                :num_channels,
-                :layer_norm_eps
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      model_type: "clip_vision_model",
-      num_hidden_layers: 24,
-      hidden_size: 1024,
-      intermediate_size: 4096,
-      num_attention_heads: 16,
-      image_size: 336,
-      patch_size: 14,
-      projection_dim: 768,
-      vocab_size: 32_000,
-      num_channels: 3,
-      layer_norm_eps: 1e-5
-    )
-      @model_type = model_type
-      @num_hidden_layers = num_hidden_layers
-      @hidden_size = hidden_size
-      @intermediate_size = intermediate_size
-      @num_attention_heads = num_attention_heads
-      @image_size = image_size
-      @patch_size = patch_size
-      @projection_dim = projection_dim
-      @vocab_size = vocab_size
-      @num_channels = num_channels
-      @layer_norm_eps = layer_norm_eps
-    end
+    field :model_type, String, default: "clip_vision_model"
+    field :num_hidden_layers, Integer, default: 24
+    field :hidden_size, Integer, default: 1024
+    field :intermediate_size, Integer, default: 4096
+    field :num_attention_heads, Integer, default: 16
+    field :image_size, Integer, default: 336
+    field :patch_size, Integer, default: 14
+    field :projection_dim, Integer, default: 768
+    field :vocab_size, Integer, default: 32_000
+    field :num_channels, Integer, default: 3
+    field :layer_norm_eps, [Integer, Float], default: 1e-5
 
     def self.from_dict(params)
-      p = params.transform_keys(&:to_s)
-      new(
-        model_type: p.fetch("model_type", "clip_vision_model"),
-        num_hidden_layers: p.fetch("num_hidden_layers", 24),
-        hidden_size: p.fetch("hidden_size", 1024),
-        intermediate_size: p.fetch("intermediate_size", 4096),
-        num_attention_heads: p.fetch("num_attention_heads", 16),
-        image_size: p.fetch("image_size", 336),
-        patch_size: p.fetch("patch_size", 14),
-        projection_dim: p.fetch("projection_dim", 768),
-        vocab_size: p.fetch("vocab_size", 32_000),
-        num_channels: p.fetch("num_channels", 3),
-        layer_norm_eps: p.fetch("layer_norm_eps", 1e-5)
-      )
+      from_hash(params)
     end
   end
 
@@ -171,6 +133,10 @@ module LlavaExample
       super()
       self.layers = Array.new(config.num_hidden_layers) { EncoderLayer.new(config) }
     end
+
+    def call(x, mask: nil)
+      MLX::DSL.run_stack(layers, x, mask: mask)
+    end
   end
 
   class VisionEmbeddings < MLX::NN::Module
@@ -225,9 +191,13 @@ module LlavaExample
 
       hidden_states = output_hidden_states ? [x] : nil
 
-      encoder.layers.each do |layer|
-        x = layer.call(x, mask: nil)
-        hidden_states << x if output_hidden_states
+      if output_hidden_states
+        encoder.layers.each do |layer|
+          x = layer.call(x, mask: nil)
+          hidden_states << x
+        end
+      else
+        x = encoder.call(x, mask: nil)
       end
 
       pooler_output = post_layernorm.call(

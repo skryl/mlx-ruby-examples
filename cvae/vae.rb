@@ -1,9 +1,8 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module CvaeExample
   module_function
@@ -107,6 +106,8 @@ module CvaeExample
   end
 
   class CVAE < MLX::NN::Module
+    include MLX::DSL::ModelMixin
+
     attr_reader :num_latent_dims
 
     def initialize(num_latent_dims, input_shape, max_num_filters)

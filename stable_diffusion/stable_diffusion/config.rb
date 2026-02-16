@@ -2,120 +2,57 @@
 
 module StableDiffusionExample
   class AutoencoderConfig
-    attr_reader :in_channels, :out_channels, :latent_channels_out, :latent_channels_in,
-                :block_out_channels, :layers_per_block, :norm_num_groups, :scaling_factor
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      in_channels: 3,
-      out_channels: 3,
-      latent_channels_out: 8,
-      latent_channels_in: 4,
-      block_out_channels: [128, 256, 512, 512],
-      layers_per_block: 2,
-      norm_num_groups: 32,
-      scaling_factor: 0.18215
-    )
-      @in_channels = in_channels
-      @out_channels = out_channels
-      @latent_channels_out = latent_channels_out
-      @latent_channels_in = latent_channels_in
-      @block_out_channels = block_out_channels
-      @layers_per_block = layers_per_block
-      @norm_num_groups = norm_num_groups
-      @scaling_factor = scaling_factor
-    end
+    field :in_channels, Integer, default: 3
+    field :out_channels, Integer, default: 3
+    field :latent_channels_out, Integer, default: 8
+    field :latent_channels_in, Integer, default: 4
+    field :block_out_channels, Array, default: [128, 256, 512, 512]
+    field :layers_per_block, Integer, default: 2
+    field :norm_num_groups, Integer, default: 32
+    field :scaling_factor, [Integer, Float], default: 0.18215
   end
 
   class CLIPTextModelConfig
-    attr_reader :num_layers, :model_dims, :num_heads, :max_length, :vocab_size, :projection_dim, :hidden_act
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      num_layers: 23,
-      model_dims: 1024,
-      num_heads: 16,
-      max_length: 77,
-      vocab_size: 49_408,
-      projection_dim: nil,
-      hidden_act: "quick_gelu"
-    )
-      @num_layers = num_layers
-      @model_dims = model_dims
-      @num_heads = num_heads
-      @max_length = max_length
-      @vocab_size = vocab_size
-      @projection_dim = projection_dim
-      @hidden_act = hidden_act
-    end
+    field :num_layers, Integer, default: 23
+    field :model_dims, Integer, default: 1024
+    field :num_heads, Integer, default: 16
+    field :max_length, Integer, default: 77
+    field :vocab_size, Integer, default: 49_408
+    field :projection_dim, [Integer, NilClass], default: nil
+    field :hidden_act, String, default: "quick_gelu"
   end
 
   class UNetConfig
-    attr_reader :in_channels,
-                :out_channels,
-                :conv_in_kernel,
-                :conv_out_kernel,
-                :block_out_channels,
-                :layers_per_block,
-                :mid_block_layers,
-                :transformer_layers_per_block,
-                :num_attention_heads,
-                :cross_attention_dim,
-                :norm_num_groups,
-                :down_block_types,
-                :up_block_types,
-                :addition_embed_type,
-                :addition_time_embed_dim,
-                :projection_class_embeddings_input_dim
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      in_channels: 4,
-      out_channels: 4,
-      conv_in_kernel: 3,
-      conv_out_kernel: 3,
-      block_out_channels: [320, 640, 1280, 1280],
-      layers_per_block: [2, 2, 2, 2],
-      mid_block_layers: 2,
-      transformer_layers_per_block: [1, 1, 1, 1],
-      num_attention_heads: [5, 10, 20, 20],
-      cross_attention_dim: [1024, 1024, 1024, 1024],
-      norm_num_groups: 32,
-      down_block_types: ["CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D"],
-      up_block_types: ["UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"],
-      addition_embed_type: nil,
-      addition_time_embed_dim: nil,
-      projection_class_embeddings_input_dim: nil
-    )
-      @in_channels = in_channels
-      @out_channels = out_channels
-      @conv_in_kernel = conv_in_kernel
-      @conv_out_kernel = conv_out_kernel
-      @block_out_channels = block_out_channels
-      @layers_per_block = layers_per_block
-      @mid_block_layers = mid_block_layers
-      @transformer_layers_per_block = transformer_layers_per_block
-      @num_attention_heads = num_attention_heads
-      @cross_attention_dim = cross_attention_dim
-      @norm_num_groups = norm_num_groups
-      @down_block_types = down_block_types
-      @up_block_types = up_block_types
-      @addition_embed_type = addition_embed_type
-      @addition_time_embed_dim = addition_time_embed_dim
-      @projection_class_embeddings_input_dim = projection_class_embeddings_input_dim
-    end
+    field :in_channels, Integer, default: 4
+    field :out_channels, Integer, default: 4
+    field :conv_in_kernel, Integer, default: 3
+    field :conv_out_kernel, Integer, default: 3
+    field :block_out_channels, Array, default: [320, 640, 1280, 1280]
+    field :layers_per_block, Array, default: [2, 2, 2, 2]
+    field :mid_block_layers, Integer, default: 2
+    field :transformer_layers_per_block, Array, default: [1, 1, 1, 1]
+    field :num_attention_heads, Array, default: [5, 10, 20, 20]
+    field :cross_attention_dim, Array, default: [1024, 1024, 1024, 1024]
+    field :norm_num_groups, Integer, default: 32
+    field :down_block_types, Array, default: ["CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D"]
+    field :up_block_types, Array, default: ["UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"]
+    field :addition_embed_type, [String, NilClass], default: nil
+    field :addition_time_embed_dim, [Integer, NilClass], default: nil
+    field :projection_class_embeddings_input_dim, [Integer, NilClass], default: nil
   end
 
   class DiffusionConfig
-    attr_reader :beta_schedule, :beta_start, :beta_end, :num_train_steps
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      beta_schedule: "scaled_linear",
-      beta_start: 0.00085,
-      beta_end: 0.012,
-      num_train_steps: 1000
-    )
-      @beta_schedule = beta_schedule
-      @beta_start = beta_start
-      @beta_end = beta_end
-      @num_train_steps = num_train_steps
-    end
+    field :beta_schedule, String, default: "scaled_linear"
+    field :beta_start, [Integer, Float], default: 0.00085
+    field :beta_end, [Integer, Float], default: 0.012
+    field :num_train_steps, Integer, default: 1000
   end
 end

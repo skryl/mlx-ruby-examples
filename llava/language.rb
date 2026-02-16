@@ -1,97 +1,35 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module LlavaExample
   class TextConfig
-    attr_accessor :model_type,
-                  :hidden_size,
-                  :num_hidden_layers,
-                  :intermediate_size,
-                  :num_attention_heads,
-                  :rms_norm_eps,
-                  :vocab_size,
-                  :num_key_value_heads,
-                  :rope_theta,
-                  :rope_traditional,
-                  :rope_scaling
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      model_type: "llama",
-      hidden_size: 4096,
-      num_hidden_layers: 32,
-      intermediate_size: 11_008,
-      num_attention_heads: 32,
-      rms_norm_eps: 1e-6,
-      vocab_size: 32_000,
-      num_key_value_heads: nil,
-      rope_theta: 10_000.0,
-      rope_traditional: false,
-      rope_scaling: nil
-    )
-      @model_type = model_type
-      @hidden_size = hidden_size
-      @num_hidden_layers = num_hidden_layers
-      @intermediate_size = intermediate_size
-      @num_attention_heads = num_attention_heads
-      @rms_norm_eps = rms_norm_eps
-      @vocab_size = vocab_size
-      @num_key_value_heads = num_key_value_heads || num_attention_heads
-      @rope_theta = rope_theta
-      @rope_traditional = rope_traditional
-      @rope_scaling = rope_scaling
-      validate_rope_scaling!
+    field :model_type, String, default: "llama"
+    field :hidden_size, Integer, default: 4096
+    field :num_hidden_layers, Integer, default: 32
+    field :intermediate_size, Integer, default: 11_008
+    field :num_attention_heads, Integer, default: 32
+    field :rms_norm_eps, [Integer, Float], default: 1e-6
+    field :vocab_size, Integer, default: 32_000
+    field :num_key_value_heads, Integer, default: ->(cfg) { cfg.num_attention_heads }
+    field :rope_theta, [Integer, Float], default: 10_000.0
+    field :rope_traditional, [TrueClass, FalseClass], default: false
+    field :rope_scaling, [Hash, NilClass], default: nil do |value|
+      next if value.nil?
+      required = %w[factor type]
+      unless required.all? { |key| value.key?(key) || value.key?(key.to_sym) }
+        raise ArgumentError, "rope_scaling must contain keys #{required.inspect}"
+      end
+      type = value["type"] || value[:type]
+      raise ArgumentError, "rope_scaling 'type' currently only supports 'linear'" unless type == "linear"
     end
 
     def self.from_dict(params)
-      p = params.transform_keys(&:to_s)
-      new(
-        model_type: p.fetch("model_type", "llama"),
-        hidden_size: p.fetch("hidden_size", 4096),
-        num_hidden_layers: p.fetch("num_hidden_layers", 32),
-        intermediate_size: p.fetch("intermediate_size", 11_008),
-        num_attention_heads: p.fetch("num_attention_heads", 32),
-        rms_norm_eps: p.fetch("rms_norm_eps", 1e-6),
-        vocab_size: p.fetch("vocab_size", 32_000),
-        num_key_value_heads: p["num_key_value_heads"],
-        rope_theta: p.fetch("rope_theta", 10_000.0),
-        rope_traditional: p.fetch("rope_traditional", false),
-        rope_scaling: p["rope_scaling"]
-      )
-    end
-
-    def to_h
-      {
-        "model_type" => model_type,
-        "hidden_size" => hidden_size,
-        "num_hidden_layers" => num_hidden_layers,
-        "intermediate_size" => intermediate_size,
-        "num_attention_heads" => num_attention_heads,
-        "rms_norm_eps" => rms_norm_eps,
-        "vocab_size" => vocab_size,
-        "num_key_value_heads" => num_key_value_heads,
-        "rope_theta" => rope_theta,
-        "rope_traditional" => rope_traditional,
-        "rope_scaling" => rope_scaling
-      }
-    end
-
-    private
-
-    def validate_rope_scaling!
-      return if rope_scaling.nil?
-
-      required = %w[factor type]
-      unless required.all? { |key| rope_scaling.key?(key) || rope_scaling.key?(key.to_sym) }
-        raise ArgumentError, "rope_scaling must contain keys #{required.inspect}"
-      end
-      type = rope_scaling["type"] || rope_scaling[:type]
-      return if type == "linear"
-
-      raise ArgumentError, "rope_scaling 'type' currently only supports 'linear'"
+      from_hash(params)
     end
   end
 
@@ -207,18 +145,16 @@ module LlavaExample
 
     def call(inputs, cache: nil, inputs_embeds: nil)
       h = inputs_embeds.nil? ? embed_tokens.call(inputs) : inputs_embeds
+      offset = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
 
       mask = nil
-      if h.shape[1] > 1
-        mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(h.shape[1])
-        mask = mask.astype(h.dtype)
+      if h.shape[1] > 1 || offset.positive?
+        mask = MLX::DSL::Masks.causal(length: h.shape[1], offset: offset, dtype: h.dtype)
       end
 
-      cache ||= Array.new(layers.length)
-      layers.each_with_index do |layer, i|
-        h, cache[i] = layer.call(h, mask: mask, cache: cache[i])
-      end
-      [norm.call(h), cache]
+      cache_state = cache || Array.new(layers.length)
+      h, next_cache = MLX::DSL.run_stack(layers, h, mask: mask, cache: cache_state)
+      [norm.call(h), next_cache]
     end
   end
 

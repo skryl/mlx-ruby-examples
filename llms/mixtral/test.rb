@@ -3,7 +3,7 @@
 require "optparse"
 
 require_relative "mixtral"
-
+require_relative "../../benchmark/parity"
 module MixtralExample
   module TestHelpers
     module_function
@@ -23,6 +23,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -43,7 +48,6 @@ if $PROGRAM_NAME == __FILE__
 
   model = MixtralExample::Mixtral.new(args)
   inputs = MLX::Core.array([Array.new(12) { |i| i % args.vocab_size }], MLX::Core.int32)
-
   logits, cache = model.call(inputs)
   MLX::Core.eval(logits)
   unless logits.shape == [1, 1, args.vocab_size]
@@ -54,6 +58,24 @@ if $PROGRAM_NAME == __FILE__
   end
   unless cache.length == args.n_layers
     raise "Mixtral cache length mismatch: expected #{args.n_layers}, got #{cache.length}"
+  end
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "llms/mixtral",
+      inputs: { inputs: inputs },
+      outputs: { logits: logits },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
   end
 
   params = MLX::Utils.tree_map(

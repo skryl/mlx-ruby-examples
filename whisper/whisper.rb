@@ -3,77 +3,27 @@
 require "base64"
 require "zlib"
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module WhisperExample
   class ModelDimensions
-    attr_reader :n_mels,
-                :n_audio_ctx,
-                :n_audio_state,
-                :n_audio_head,
-                :n_audio_layer,
-                :n_vocab,
-                :n_text_ctx,
-                :n_text_state,
-                :n_text_head,
-                :n_text_layer
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      n_mels: 80,
-      n_audio_ctx: 1500,
-      n_audio_state: 384,
-      n_audio_head: 6,
-      n_audio_layer: 4,
-      n_vocab: 51_865,
-      n_text_ctx: 448,
-      n_text_state: 384,
-      n_text_head: 6,
-      n_text_layer: 4
-    )
-      @n_mels = n_mels
-      @n_audio_ctx = n_audio_ctx
-      @n_audio_state = n_audio_state
-      @n_audio_head = n_audio_head
-      @n_audio_layer = n_audio_layer
-      @n_vocab = n_vocab
-      @n_text_ctx = n_text_ctx
-      @n_text_state = n_text_state
-      @n_text_head = n_text_head
-      @n_text_layer = n_text_layer
-    end
+    field :n_mels, Integer, default: 80
+    field :n_audio_ctx, Integer, default: 1500
+    field :n_audio_state, Integer, default: 384
+    field :n_audio_head, Integer, default: 6
+    field :n_audio_layer, Integer, default: 4
+    field :n_vocab, Integer, default: 51_865
+    field :n_text_ctx, Integer, default: 448
+    field :n_text_state, Integer, default: 384
+    field :n_text_head, Integer, default: 6
+    field :n_text_layer, Integer, default: 4
 
     def self.from_hash(raw)
-      data = raw.transform_keys(&:to_s)
-      new(
-        n_mels: data.fetch("n_mels", 80),
-        n_audio_ctx: data.fetch("n_audio_ctx", 1500),
-        n_audio_state: data.fetch("n_audio_state", 384),
-        n_audio_head: data.fetch("n_audio_head", 6),
-        n_audio_layer: data.fetch("n_audio_layer", 4),
-        n_vocab: data.fetch("n_vocab", 51_865),
-        n_text_ctx: data.fetch("n_text_ctx", 448),
-        n_text_state: data.fetch("n_text_state", 384),
-        n_text_head: data.fetch("n_text_head", 6),
-        n_text_layer: data.fetch("n_text_layer", 4)
-      )
-    end
-
-    def to_h
-      {
-        "n_mels" => n_mels,
-        "n_audio_ctx" => n_audio_ctx,
-        "n_audio_state" => n_audio_state,
-        "n_audio_head" => n_audio_head,
-        "n_audio_layer" => n_audio_layer,
-        "n_vocab" => n_vocab,
-        "n_text_ctx" => n_text_ctx,
-        "n_text_state" => n_text_state,
-        "n_text_head" => n_text_head,
-        "n_text_layer" => n_text_layer
-      }
+      super
     end
   end
 
@@ -94,10 +44,7 @@ module WhisperExample
     end
 
     def create_additive_causal_mask(n)
-      row = MLX::Core.expand_dims(MLX::Core.arange(0, n, 1), 1)
-      col = MLX::Core.expand_dims(MLX::Core.arange(0, n, 1), 0)
-      mask = MLX::Core.less(row, col).astype(MLX::Core.float32)
-      MLX::Core.multiply(mask, -1e9)
+      MLX::DSL::Masks.causal(length: n, dtype: MLX::Core.float32)
     end
 
     def slice_time(x, start_idx, end_idx)
@@ -105,7 +52,7 @@ module WhisperExample
     end
 
     def downsample_2x(x)
-      idx = MLX::Core.array((0...x.shape[1]).step(2).to_a, MLX::Core.int32)
+      idx = MLX::Core.arange(0, x.shape[1], 2, MLX::Core.int32)
       MLX::Core.take(x, idx, 1)
     end
   end
@@ -180,7 +127,7 @@ module WhisperExample
       self.mlp_ln = MLX::NN::LayerNorm.new(n_state)
     end
 
-    def call(x, xa: nil, mask: nil, kv_cache: nil)
+    def call(x, xa: nil, mask: nil, kv_cache: nil, return_state: false)
       kv, cross_kv = kv_cache || [nil, nil]
       y, kv, _qk = attn.call(attn_ln.call(x), mask: mask, kv_cache: kv)
       x = MLX::Core.add(x, y)
@@ -192,6 +139,8 @@ module WhisperExample
       end
 
       x = MLX::Core.add(x, mlp2.call(MLX::NN.gelu(mlp1.call(mlp_ln.call(x)))))
+      return x unless return_state
+
       [x, [kv, cross_kv], cross_qk]
     end
   end
@@ -219,7 +168,7 @@ module WhisperExample
       end
 
       h = MLX::Core.add(h, MLX::Core.expand_dims(positional_embedding, 0))
-      blocks.each { |block| h, = block.call(h) }
+      h = MLX::DSL.run_stack(blocks, h)
       ln_post.call(h)
     end
   end
@@ -237,6 +186,8 @@ module WhisperExample
     end
 
     def call(x, xa, kv_cache: nil)
+      validate_token_ids!(x)
+
       offset = if kv_cache && !kv_cache.empty? && !kv_cache[0].nil? && !kv_cache[0][0].nil? && !kv_cache[0][0][0].nil?
                  kv_cache[0][0][0].shape[1]
                else
@@ -250,11 +201,32 @@ module WhisperExample
       kv_cache ||= Array.new(blocks.length)
       cross_qk = Array.new(blocks.length)
       blocks.each_with_index do |block, idx|
-        h, kv_cache[idx], cross_qk[idx] = block.call(h, xa: xa, mask: mask, kv_cache: kv_cache[idx])
+        h, kv_cache[idx], cross_qk[idx] = block.call(
+          h,
+          xa: xa,
+          mask: mask,
+          kv_cache: kv_cache[idx],
+          return_state: true
+        )
       end
 
       h = ln.call(h)
       [output_proj.call(h), kv_cache, cross_qk]
+    end
+
+    private
+
+    def validate_token_ids!(x)
+      token_count = x.shape.reduce(1, :*)
+      return if token_count.zero?
+
+      min_id = MLX::Core.min(x).item.to_i
+      max_id = MLX::Core.max(x).item.to_i
+      vocab_size = token_embedding.weight.shape[0]
+
+      return if min_id >= 0 && max_id < vocab_size
+
+      raise ArgumentError, "token ids out of range for decoder vocab #{vocab_size}: min=#{min_id}, max=#{max_id}"
     end
   end
 

@@ -4,10 +4,9 @@ require "json"
 require "open3"
 require "pathname"
 
-dsl_lib = File.join(File.expand_path("..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 require_relative "encodec"
 
@@ -16,68 +15,39 @@ module MusicGenExample
   EXTRACT_SCRIPT = Pathname.new(__dir__).join("python", "extract_state_dict.py").to_s
 
   class TextEncoderConfig
-    attr_reader :_name_or_path, :d_model, :vocab_size, :max_length
+    include MLX::DSL::ConfigSchema
 
-    def initialize(_name_or_path: "google/flan-t5-small", d_model: 512, vocab_size: 2048, max_length: 32)
-      @_name_or_path = _name_or_path
-      @d_model = d_model
-      @vocab_size = vocab_size
-      @max_length = max_length
-    end
+    field :_name_or_path, String, default: "google/flan-t5-small"
+    field :d_model, Integer, default: 512
+    field :vocab_size, Integer, default: 2048
+    field :max_length, Integer, default: 32
 
     def self.from_hash(raw)
-      data = raw.transform_keys(&:to_s)
-      new(
-        _name_or_path: data.fetch("_name_or_path", "google/flan-t5-small"),
-        d_model: data.fetch("d_model", 512),
-        vocab_size: data.fetch("vocab_size", 2048),
-        max_length: data.fetch("max_length", 32)
-      )
+      super
     end
   end
 
   class AudioEncoderConfig
-    attr_reader :_name_or_path, :codebook_size, :sampling_rate
+    include MLX::DSL::ConfigSchema
 
-    def initialize(_name_or_path: "facebook/encodec_32khz", codebook_size: 1024, sampling_rate: 32_000)
-      @_name_or_path = _name_or_path
-      @codebook_size = codebook_size
-      @sampling_rate = sampling_rate
-    end
+    field :_name_or_path, String, default: "facebook/encodec_32khz"
+    field :codebook_size, Integer, default: 1024
+    field :sampling_rate, Integer, default: 32_000
 
     def self.from_hash(raw)
-      data = raw.transform_keys(&:to_s)
-      new(
-        _name_or_path: data.fetch("_name_or_path", "facebook/encodec_32khz"),
-        codebook_size: data.fetch("codebook_size", 1024),
-        sampling_rate: data.fetch("sampling_rate", 32_000)
-      )
+      super
     end
   end
 
   class DecoderConfig
-    attr_reader :num_codebooks,
-                :bos_token_id,
-                :hidden_size,
-                :num_attention_heads,
-                :ffn_dim,
-                :num_hidden_layers
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      num_codebooks: 4,
-      bos_token_id: 1024,
-      hidden_size: 256,
-      num_attention_heads: 8,
-      ffn_dim: 1024,
-      num_hidden_layers: 6
-    )
-      @num_codebooks = num_codebooks
-      @bos_token_id = bos_token_id
-      @hidden_size = hidden_size
-      @num_attention_heads = num_attention_heads
-      @ffn_dim = ffn_dim
-      @num_hidden_layers = num_hidden_layers
-    end
+    field :num_codebooks, Integer, default: 4
+    field :bos_token_id, Integer, default: 1024
+    field :hidden_size, Integer, default: 256
+    field :num_attention_heads, Integer, default: 8
+    field :ffn_dim, Integer, default: 1024
+    field :num_hidden_layers, Integer, default: 6
 
     def self.from_hash(raw)
       data = raw.transform_keys(&:to_s)
@@ -93,13 +63,11 @@ module MusicGenExample
   end
 
   class MusicGenConfig
-    attr_reader :text_encoder, :audio_encoder, :decoder
+    include MLX::DSL::ConfigSchema
 
-    def initialize(text_encoder:, audio_encoder:, decoder:)
-      @text_encoder = text_encoder
-      @audio_encoder = audio_encoder
-      @decoder = decoder
-    end
+    field :text_encoder, [TextEncoderConfig, Hash], required: true
+    field :audio_encoder, [AudioEncoderConfig, Hash], required: true
+    field :decoder, [DecoderConfig, Hash], required: true
 
     def self.from_hash(raw)
       data = raw.transform_keys(&:to_s)
@@ -213,12 +181,23 @@ module MusicGenExample
       keys = MLX::Core.transpose(MLX::Core.reshape(keys, [b, lk, @n_heads, @head_dim]), [0, 2, 1, 3])
       values = MLX::Core.transpose(MLX::Core.reshape(values, [b, lk, @n_heads, @head_dim]), [0, 2, 1, 3])
 
-      keys, values = cache.update_and_fetch(keys, values) unless cache.nil?
+      unless cache.nil?
+        if cache.respond_to?(:update_and_fetch)
+          keys, values = cache.update_and_fetch(keys, values)
+        else
+          key_cache, value_cache = cache
+          unless key_cache.nil? || value_cache.nil?
+            keys = MLX::Core.concatenate([key_cache, keys], 2)
+            values = MLX::Core.concatenate([value_cache, values], 2)
+          end
+        end
+      end
 
       output = MLX::Core.scaled_dot_product_attention(queries, keys, values, @scale, mask)
       output = MLX::Core.transpose(output, [0, 2, 1, 3])
       output = MLX::Core.reshape(output, [b, lq, d])
-      out_proj.call(output)
+      projected = out_proj.call(output)
+      cache.nil? ? projected : [projected, [keys, values]]
     end
   end
 
@@ -238,14 +217,21 @@ module MusicGenExample
       self.norm2 = MLX::NN::LayerNorm.new(hidden, eps: 1e-5)
     end
 
-    def call(x, conditioning, mask: nil, cache: nil)
+    def call(x, conditioning:, mask: nil, cache: nil)
       xn = norm1.call(x)
-      x = MLX::Core.add(x, self_attn.call(xn, xn, xn, mask: mask, cache: cache))
+      self_out = self_attn.call(xn, xn, xn, mask: mask, cache: cache)
+      if self_out.is_a?(Array) && self_out.length == 2
+        attn_out, next_cache = self_out
+      else
+        attn_out = self_out
+        next_cache = cache
+      end
+      x = MLX::Core.add(x, attn_out)
       xn = norm_cross.call(x)
       x = MLX::Core.add(x, cross_attn.call(xn, conditioning, conditioning, mask: mask, cache: nil))
       xn = norm2.call(x)
       x = MLX::Core.add(x, linear2.call(MLX::NN.gelu(linear1.call(xn))))
-      x
+      cache.nil? ? x : [x, next_cache]
     end
   end
 
@@ -254,7 +240,7 @@ module MusicGenExample
     return MLX::Core.expand_dims(MLX::Core.argmax(logits, axis), axis) if top_k <= 0 || top_k >= dim
 
     sorted_indices = MLX::Core.argsort(logits, axis)
-    keep = MLX::Core.array(((dim - top_k)...dim).to_a, MLX::Core.int32)
+    keep = MLX::Core.arange(dim - top_k, dim, 1, MLX::Core.int32)
     top_indices = MLX::Core.take(sorted_indices, keep, axis)
     top_logits = MLX::Core.take_along_axis(logits, top_indices, axis)
 
@@ -328,8 +314,6 @@ module MusicGenExample
     end
 
     def call(audio_tokens, conditioning, cache: nil)
-      cache ||= Array.new(layers.length)
-
       x = nil
       num_codebooks.times do |k|
         tok = MLX::Core.squeeze(MLX::Core.take(audio_tokens, MLX::Core.array([k], MLX::Core.int32), -1), -1)
@@ -337,12 +321,22 @@ module MusicGenExample
         x = x.nil? ? emb_k : MLX::Core.add(x, emb_k)
       end
 
-      offset = (!cache.empty? && !cache[0].nil?) ? cache[0].offset : 0
+      offset = if cache.nil?
+        0
+      elsif cache.respond_to?(:offset)
+        MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
+      elsif cache.is_a?(Array) && !cache.empty? && cache[0].respond_to?(:offset)
+        cache[0].offset
+      else
+        MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
+      end
       pos_emb = MusicGenExample.create_sin_embedding(offset, hidden_size)
       x = MLX::Core.add(x, pos_emb.astype(x.dtype))
 
-      layers.each_with_index do |layer, i|
-        x = layer.call(x, conditioning, cache: cache[i])
+      if cache.nil?
+        x = MLX::DSL.run_stack(layers, x, conditioning: conditioning, mask: nil)
+      else
+        x, = MLX::DSL.run_stack(layers, x, conditioning: conditioning, mask: nil, cache: cache)
       end
 
       x = out_norm.call(x)
@@ -354,8 +348,7 @@ module MusicGenExample
       conditioning = text_conditioner.call(text)
       conditioning = MLX::Core.concatenate([conditioning, MLX::Core.zeros_like(conditioning)], 0)
 
-      head_dim = hidden_size / num_attention_heads
-      cache = Array.new(layers.length) { KVCache.new(head_dim, num_attention_heads) }
+      cache = MLX::DSL::KVCache.new(num_layers: layers.length)
 
       current = MLX::Core.full([1, 1, num_codebooks], bos_token_id, MLX::Core.int32)
       generated = []
@@ -391,12 +384,10 @@ module MusicGenExample
     end
 
     def self.sanitize(weights)
+      renamed = weight_mapper.apply(weights)
       out = {}
-      weights.each do |key, arr|
+      renamed.each do |key, arr|
         k = key.to_s
-        k = k.delete_prefix("transformer.") if k.start_with?("transformer.")
-        k = k.gsub("cross_attention", "cross_attn") if k.include?("cross_attention")
-        k = k.gsub("condition_provider.conditioners.description", "text_conditioner") if k.include?("condition_provider")
 
         if k.include?("in_proj_weight") && arr.shape.length == 2
           dim = arr.shape[0] / 3
@@ -410,6 +401,14 @@ module MusicGenExample
         out[k] = arr
       end
       out
+    end
+
+    def self.weight_mapper
+      @weight_mapper ||= MLX::DSL.weight_map do
+        strip_prefix "transformer."
+        rename "cross_attention" => "cross_attn"
+        rename "condition_provider.conditioners.description" => "text_conditioner"
+      end
     end
 
     def self.from_pretrained(path_or_repo, python_bin: ENV.fetch("PYTHON_BIN", "python3"))

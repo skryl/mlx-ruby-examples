@@ -4,13 +4,25 @@ require "json"
 require "optparse"
 
 ROOT = File.expand_path("..", __dir__)
-DSL_LIB = File.join(ROOT, "codex-dsl", "lib")
-$LOAD_PATH.unshift(DSL_LIB) unless $LOAD_PATH.include?(DSL_LIB)
 
 require "mlx"
+require "mlx/dsl"
 require_relative "hf_bridge"
 
 module BertExample
+  class BertConfig
+    include MLX::DSL::ConfigSchema
+
+    field :vocab_size, Integer, required: true
+    field :hidden_size, Integer, required: true
+    field :type_vocab_size, Integer, required: true
+    field :max_position_embeddings, Integer, required: true
+    field :layer_norm_eps, [Integer, Float], default: 1e-12
+    field :num_hidden_layers, Integer, required: true
+    field :num_attention_heads, Integer, required: true
+    field :intermediate_size, Integer, required: true
+  end
+
   class HfTokenizer
     def initialize(model_name:, bridge:)
       @model_name = model_name
@@ -38,7 +50,8 @@ module BertExample
     layer :linear2, MLX::NN::Linear, -> { mlp_dims }, -> { dims }
     layer :gelu, MLX::NN::GELU
 
-    def call(x, mask)
+    def call(x, mask = nil, **kwargs)
+      mask = kwargs[:mask] if kwargs.key?(:mask)
       attention_out = attention.call(x, x, x, mask)
       add_and_norm = ln1.call(MLX::Core.add(x, attention_out))
 
@@ -63,10 +76,7 @@ module BertExample
     end
 
     def call(x, mask)
-      layers.each do |layer|
-        x = layer.call(x, mask)
-      end
-      x
+      MLX::DSL.run_stack(layers, x, mask: mask)
     end
   end
 
@@ -95,11 +105,7 @@ module BertExample
     private
 
     def position_ids_for(input_ids)
-      sequence_length = input_ids.shape[1]
-      base = MLX::Core.arange(0, sequence_length, 1)
-      base = base.astype(MLX::Core.int32)
-      base = MLX::Core.reshape(base, [1, sequence_length])
-      MLX::Core.broadcast_to(base, input_ids.shape)
+      MLX::DSL::Positions.ids_like(input_ids, dtype: MLX::Core.int32)
     end
   end
 
@@ -167,7 +173,7 @@ module BertExample
     intermediate_size
   ].freeze
 
-  def load_model(bert_model:, weights_path:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "python3"))
+  def load_model(bert_model:, weights_path:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"))
     if weights_path.nil? || weights_path.to_s.empty? || !File.exist?(weights_path)
       raise ArgumentError, "No model weights found in #{weights_path.inspect}"
     end
@@ -179,15 +185,16 @@ module BertExample
       raise ArgumentError, "config is missing required key(s): #{missing.join(', ')}"
     end
 
+    schema = BertConfig.from_hash(config)
     model = Bert.new(
-      vocab_size: config.fetch("vocab_size"),
-      hidden_size: config.fetch("hidden_size"),
-      type_vocab_size: config.fetch("type_vocab_size"),
-      max_position_embeddings: config.fetch("max_position_embeddings"),
-      layer_norm_eps: config.fetch("layer_norm_eps"),
-      num_hidden_layers: config.fetch("num_hidden_layers"),
-      num_attention_heads: config.fetch("num_attention_heads"),
-      intermediate_size: config.fetch("intermediate_size")
+      vocab_size: schema.vocab_size,
+      hidden_size: schema.hidden_size,
+      type_vocab_size: schema.type_vocab_size,
+      max_position_embeddings: schema.max_position_embeddings,
+      layer_norm_eps: schema.layer_norm_eps,
+      num_hidden_layers: schema.num_hidden_layers,
+      num_attention_heads: schema.num_attention_heads,
+      intermediate_size: schema.intermediate_size
     )
     model.load_weights(weights_path)
 
@@ -195,7 +202,7 @@ module BertExample
     [model, tokenizer]
   end
 
-  def run(bert_model:, mlx_model:, batch:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "python3"))
+  def run(bert_model:, mlx_model:, batch:, config_path: nil, python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"))
     model, tokenizer = load_model(
       bert_model: bert_model,
       weights_path: mlx_model,
@@ -213,7 +220,7 @@ if $PROGRAM_NAME == __FILE__
     mlx_model: "weights/bert-base-uncased.npz",
     text: [],
     config_path: nil,
-    python_bin: ENV.fetch("PYTHON_BIN", "python3"),
+    python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"),
     json_out: nil
   }
 

@@ -1,43 +1,22 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("../..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
+require "mlx/dsl"
 
 module FluxExample
   class AutoEncoderParams
-    attr_reader :resolution,
-                :in_channels,
-                :ch,
-                :out_ch,
-                :ch_mult,
-                :num_res_blocks,
-                :z_channels,
-                :scale_factor,
-                :shift_factor
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      resolution: 256,
-      in_channels: 3,
-      ch: 128,
-      out_ch: 3,
-      ch_mult: [1, 2, 4, 4],
-      num_res_blocks: 2,
-      z_channels: 16,
-      scale_factor: 0.3611,
-      shift_factor: 0.1159
-    )
-      @resolution = resolution
-      @in_channels = in_channels
-      @ch = ch
-      @out_ch = out_ch
-      @ch_mult = ch_mult
-      @num_res_blocks = num_res_blocks
-      @z_channels = z_channels
-      @scale_factor = scale_factor
-      @shift_factor = shift_factor
-    end
+    field :resolution, Integer, default: 256
+    field :in_channels, Integer, default: 3
+    field :ch, Integer, default: 128
+    field :out_ch, Integer, default: 3
+    field :ch_mult, Array, default: [1, 2, 4, 4]
+    field :num_res_blocks, Integer, default: 2
+    field :z_channels, Integer, default: 16
+    field :scale_factor, [Integer, Float], default: 0.3611
+    field :shift_factor, [Integer, Float], default: 0.1159
   end
 
   module AutoencoderOps
@@ -56,10 +35,8 @@ module FluxExample
     end
 
     def downsample_stride(x, stride: 8)
-      h_idx = (0...x.shape[1]).step(stride).to_a
-      w_idx = (0...x.shape[2]).step(stride).to_a
-      h_idx = MLX::Core.array(h_idx, MLX::Core.int32)
-      w_idx = MLX::Core.array(w_idx, MLX::Core.int32)
+      h_idx = MLX::Core.arange(0, x.shape[1], stride, MLX::Core.int32)
+      w_idx = MLX::Core.arange(0, x.shape[2], stride, MLX::Core.int32)
       y = MLX::Core.take(x, h_idx, 1)
       MLX::Core.take(y, w_idx, 2)
     end

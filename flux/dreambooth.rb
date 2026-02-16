@@ -126,7 +126,7 @@ if $PROGRAM_NAME == __FILE__
   )
 
   iter = trainer.iterate(options[:batch_size])
-  options[:iterations].times do |i|
+  MLX::DSL::Data.from(0...options[:iterations]).each do |i|
     x, t5_feat, clip_feat = iter.next
     loss, grads = step_fn.call(x, t5_feat, clip_feat, guidance)
 

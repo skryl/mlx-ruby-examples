@@ -37,6 +37,12 @@ Train on Fashion-MNIST:
 ruby mnist/main.rb --dataset fashion_mnist --data-root mnist/data --epochs 10
 ```
 
+## DSL Notes
+
+- `main.rb` uses `MLX::DSL.experiment` + `MLX::DSL::Trainer` with `MLX::DSL::Data` pipelines.
+- `--run-bundle PATH` enables auto-saving DSL run bundles.
+- `--resume-from SOURCE` resumes from a checkpoint path or run-bundle path.
+
 Run on GPU:
 
 ```bash

@@ -7,36 +7,23 @@ require "pathname"
 require "time"
 
 ROOT = File.expand_path("../..", __dir__)
-DSL_LIB = File.join(ROOT, "codex-dsl", "lib")
-$LOAD_PATH.unshift(DSL_LIB) unless $LOAD_PATH.include?(DSL_LIB)
 
 require "mlx"
+require "mlx/dsl"
 
 module MistralExample
   class ModelArgs
-    attr_reader :dim, :n_layers, :head_dim, :hidden_dim, :n_heads, :n_kv_heads, :norm_eps, :vocab_size, :rope_theta
+    include MLX::DSL::ConfigSchema
 
-    def initialize(
-      dim:,
-      n_layers:,
-      head_dim:,
-      hidden_dim:,
-      n_heads:,
-      n_kv_heads:,
-      norm_eps:,
-      vocab_size:,
-      rope_theta: 10_000
-    )
-      @dim = dim
-      @n_layers = n_layers
-      @head_dim = head_dim
-      @hidden_dim = hidden_dim
-      @n_heads = n_heads
-      @n_kv_heads = n_kv_heads
-      @norm_eps = norm_eps
-      @vocab_size = vocab_size
-      @rope_theta = rope_theta
-    end
+    field :dim, Integer, required: true
+    field :n_layers, Integer, required: true
+    field :head_dim, Integer, required: true
+    field :hidden_dim, Integer, required: true
+    field :n_heads, Integer, required: true
+    field :n_kv_heads, Integer, required: true
+    field :norm_eps, [Integer, Float], required: true
+    field :vocab_size, Integer, required: true
+    field :rope_theta, [Integer, Float], default: 10_000.0
   end
 
   class Tokenizer
@@ -127,7 +114,8 @@ module MistralExample
         keys = rope.call(keys)
       end
 
-      output = MLX::Core.scaled_dot_product_attention(queries, keys, values, @scale, mask)
+      attn_mask = mask.nil? ? nil : mask.astype(queries.dtype)
+      output = MLX::Core.scaled_dot_product_attention(queries, keys, values, @scale, attn_mask)
       output = MLX::Core.transpose(output, [0, 2, 1, 3])
       output = MLX::Core.reshape(output, [batch_size, seq_len, @n_heads * @head_dim])
 
@@ -184,19 +172,17 @@ module MistralExample
 
     def call(inputs, cache: nil)
       hidden = tok_embeddings.call(inputs)
+      offset = MLX::DSL::Positions.offset_from_cache(cache, layer: 0)
 
       mask = nil
-      if hidden.shape[1] > 1
-        mask = MLX::NN::MultiHeadAttention.create_additive_causal_mask(hidden.shape[1])
-        mask = mask.astype(hidden.dtype)
+      if hidden.shape[1] > 1 || offset.positive?
+        mask = MLX::DSL::Masks.causal(length: hidden.shape[1], offset: offset, dtype: hidden.dtype)
       end
 
-      cache ||= Array.new(layers.length)
-      layers.each_with_index do |layer, i|
-        hidden, cache[i] = layer.call(hidden, mask: mask, cache: cache[i])
-      end
+      cache_state = cache || Array.new(layers.length)
+      hidden, next_cache = MLX::DSL.run_stack(layers, hidden, mask: mask, cache: cache_state)
 
-      [output.call(norm.call(hidden)), cache]
+      [output.call(norm.call(hidden)), next_cache]
     end
   end
 
@@ -230,7 +216,7 @@ module MistralExample
     quantization = config.delete("quantization")
     config["rope_theta"] = 10_000 unless config.key?("rope_theta")
 
-    args = ModelArgs.new(
+    args = ModelArgs.from_hash(
       dim: config.fetch("dim"),
       n_layers: config.fetch("n_layers"),
       head_dim: config.fetch("head_dim"),
@@ -250,24 +236,16 @@ module MistralExample
     [model, tokenizer]
   end
 
-  def generate(prompt, model, temp: 0.0)
-    sample = lambda do |logits|
-      if temp.to_f.zero?
-        MLX::Core.argmax(logits, -1)
-      else
-        MLX::Core.categorical(MLX::Core.multiply(logits, 1.0 / temp.to_f))
-      end
+  def generate(prompt, model, temp: 0.0, max_tokens: 1_000_000)
+    sampler = if temp.to_f.zero?
+      { strategy: :argmax }
+    else
+      { strategy: :temperature, temperature: temp.to_f }
     end
-
+    generator = MLX::DSL::Generate.new(model: model, sampler: sampler, mode: :decoder_only)
     Enumerator.new do |emitter|
-      logits, cache = model.call(MLX::Core.expand_dims(prompt, 0))
-      y = sample.call(last_logits(logits))
-      emitter << y
-
-      loop do
-        logits, cache = model.call(MLX::Core.expand_dims(y, 1), cache: cache)
-        y = sample.call(MLX::Core.squeeze(logits, 1))
-        emitter << y
+      generator.each_token(input_ids: MLX::Core.expand_dims(prompt, 0), max_tokens: max_tokens) do |token_id, _chunk|
+        emitter << MLX::Core.array(token_id, MLX::Core.int32)
       end
     end
   end
@@ -282,7 +260,7 @@ module MistralExample
     prompt_tps = nil
     start = Time.now
 
-    generate(prompt_array, model, temp: temp).each_with_index do |token, idx|
+    generate(prompt_array, model, temp: temp, max_tokens: max_tokens).each_with_index do |token, idx|
       generated_count = idx + 1
       tokens << token
 
@@ -299,8 +277,6 @@ module MistralExample
         print(text, end: "", flush: true)
         tokens = []
       end
-
-      break if generated_count >= max_tokens
     end
 
     unless tokens.empty?

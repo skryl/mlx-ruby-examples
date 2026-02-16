@@ -69,29 +69,54 @@ module NormalizingFlowExample
       )
       MLX::Core.eval(model.parameters)
       optimizer = MLX::Optimizers::Adam.new(learning_rate: options[:learning_rate])
-      loss_and_grad_fn = MLX::NN.value_and_grad(model, ->(batch) { loss_fn(model, batch) })
+      trainer = model.trainer(optimizer: optimizer) do |x:|
+        loss_fn(model, x)
+      end
 
-      rng = Random.new(options[:seed] + 1)
-      all_indices = (0...x.shape[0]).to_a
+      train_data = lambda do |epoch:, **_kwargs|
+        MLX::DSL::Data
+          .from(0...x.shape[0])
+          .shuffle(seed: options[:seed] + epoch.to_i + 1)
+          .take(options[:n_batch])
+          .batch(options[:n_batch], drop_last: true)
+          .map do |batch_ids|
+            ids = MLX::Core.array(batch_ids, MLX::Core.int32)
+            MLX::Core.take(x, ids, 0)
+          end
+      end
+
       tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      options[:n_steps].times do |it|
-        ids = all_indices.sample(options[:n_batch], random: rng)
-        batch = MLX::Core.take(x, MLX::Core.array(ids, MLX::Core.int32), 0)
-        loss, grads = loss_and_grad_fn.call(batch)
-        optimizer.update(model, grads)
-        MLX::Core.eval(loss, model.parameters, optimizer.state)
-
-        next unless ((it + 1) % options[:report_every]).zero?
+      trainer.after_epoch do |ctx|
+        step = ctx.fetch(:epoch).to_i + 1
+        next unless (step % options[:report_every]).zero?
 
         toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         puts format(
           "Step %d: Loss %.4f | It/sec %.2f",
-          it + 1,
-          loss.item.to_f,
+          step,
+          ctx.fetch(:epoch_loss).to_f,
           options[:report_every] / [toc - tic, 1e-9].max
         )
         tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
+      trainer.register_dataflow(
+        :flow_train,
+        train: {
+          collate: :x,
+          reduce: :mean
+        }
+      )
+      split_plan = MLX::DSL.splits do
+        train(train_data)
+      end
+
+      trainer.fit_report(
+        split_plan,
+        **trainer.use_dataflow(:flow_train),
+        epochs: options[:n_steps],
+        keep_losses: false,
+        strict_data_reuse: true
+      )
 
       outputs = {}
       (0..options[:n_transforms]).each do |count|

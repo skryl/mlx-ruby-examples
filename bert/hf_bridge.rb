@@ -4,6 +4,7 @@ require "json"
 require "open3"
 require "optparse"
 require "pathname"
+require "shellwords"
 
 module BertExample
   class PythonBridge
@@ -15,8 +16,12 @@ module BertExample
       convert: SCRIPT_DIR.join("convert.py").to_s
     }.freeze
 
-    def initialize(python_bin: ENV.fetch("PYTHON_BIN", "python3"))
+    def initialize(python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"))
       @python_bin = python_bin
+      @python_cmd = Shellwords.split(python_bin.to_s)
+      if @python_cmd.empty?
+        raise ArgumentError, "python_bin must not be empty"
+      end
     end
 
     def config(model_name, config_path: nil)
@@ -43,8 +48,17 @@ module BertExample
 
     def run_json(script_key, *args)
       script_path = SCRIPTS.fetch(script_key)
-      stdout, stderr, status = Open3.capture3(@python_bin, script_path, *args)
+      stdout, stderr, status = Open3.capture3(*@python_cmd, script_path, *args)
       return JSON.parse(stdout) if status.success?
+
+      missing = stderr[/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/, 1]
+      if !missing.nil?
+        req_path = Pathname.new(__dir__).join("requirements.txt").to_s
+        install_cmd = Shellwords.join(@python_cmd + ["-m", "pip", "install", "-r", req_path])
+        raise RuntimeError,
+              "python bridge missing dependency '#{missing}' for #{@python_bin}. " \
+              "Install with:\n#{install_cmd}\n\nOriginal error:\n#{stderr}"
+      end
 
       raise RuntimeError, "python bridge failed (#{@python_bin} #{script_path} #{args.join(' ')}):\n#{stderr}"
     rescue JSON::ParserError => e
@@ -61,7 +75,7 @@ if $PROGRAM_NAME == __FILE__
   end
 
   options = {
-    python_bin: ENV.fetch("PYTHON_BIN", "python3"),
+    python_bin: ENV.fetch("PYTHON_BIN", "/usr/bin/env python3"),
     model: nil,
     config_path: nil,
     texts_json: nil,

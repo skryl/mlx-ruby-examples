@@ -15,7 +15,7 @@ module GGUFLLM
     skip = 0
     prompt_time = nil
 
-    GGUFLLM.generate(prompt_tokens, model, temp: temp).each_with_index do |token, n|
+    GGUFLLM.generate(prompt_tokens, model, temp: temp, max_tokens: max_tokens).each_with_index do |token, n|
       break if token.item.to_i == tokenizer.eos_token_id
 
       if n.zero?

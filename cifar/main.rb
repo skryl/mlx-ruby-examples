@@ -103,6 +103,7 @@ module CifarExample
       model.eval
       accuracies = 0.0
       count = 0
+      test_iter.reset if test_iter.respond_to?(:reset)
       test_iter.each do |batch|
         x = batch.fetch("image")
         y = batch.fetch("label")
@@ -167,24 +168,81 @@ module CifarExample
         python_bin: options[:python_bin]
       )
 
-      options[:epochs].times do |epoch|
-        tr_loss, tr_acc, throughput = train_epoch(model, train_data, optimizer, epoch, world)
-        print_zero(
-          world,
-          format(
-            "Epoch: %d | avg. Train loss %.3f | avg. Train acc %.3f | Throughput: %.2f images/sec",
-            epoch,
-            tr_loss,
-            tr_acc,
-            throughput
-          )
+      if world.size == 1
+        trainer = model.trainer(optimizer: optimizer) do |image:, label:|
+          logits = model.call(image)
+          MLX::Core.mean(MLX::NN::Losses.cross_entropy(logits, label))
+        end
+        trainer.register_dataflow(
+          :image_cls,
+          train: { reduce: :mean },
+          validation: { reduce: :mean }
         )
 
-        test_acc = test_epoch(model, test_data, world)
-        print_zero(world, format("Epoch: %d | Test acc %.3f", epoch, test_acc))
+        train_source = lambda do |epoch:, **_kwargs|
+          _ = epoch
+          train_data.reset
+          train_data
+        end
+        test_source = lambda do |epoch:, **_kwargs|
+          _ = epoch
+          test_data.reset
+          test_data
+        end
+        split_plan = MLX::DSL.splits do
+          train(train_source)
+          validation(test_source)
+        end
 
-        train_data.reset
-        test_data.reset
+        epoch_started_at = {}
+        trainer.before_epoch do |ctx|
+          epoch_started_at[ctx.fetch(:epoch)] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
+        trainer.after_epoch do |ctx|
+          epoch = ctx.fetch(:epoch)
+          started_at = epoch_started_at.fetch(epoch, Process.clock_gettime(Process::CLOCK_MONOTONIC))
+          test_acc = test_epoch(model, test_data, world)
+          print_zero(
+            world,
+            format(
+              "Epoch: %d | Train loss %.3f | Val loss %.3f | Test acc %.3f | Time %.3f s",
+              epoch,
+              ctx.fetch(:epoch_loss).to_f,
+              ctx.fetch(:val_loss).to_f,
+              test_acc,
+              Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+            )
+          )
+        end
+
+        trainer.fit_report(
+          split_plan,
+          **trainer.use_dataflow(:image_cls),
+          epochs: options[:epochs],
+          monitor: :val_loss,
+          monitor_mode: :min,
+          keep_losses: false
+        )
+      else
+        options[:epochs].times do |epoch|
+          tr_loss, tr_acc, throughput = train_epoch(model, train_data, optimizer, epoch, world)
+          print_zero(
+            world,
+            format(
+              "Epoch: %d | avg. Train loss %.3f | avg. Train acc %.3f | Throughput: %.2f images/sec",
+              epoch,
+              tr_loss,
+              tr_acc,
+              throughput
+            )
+          )
+
+          test_acc = test_epoch(model, test_data, world)
+          print_zero(world, format("Epoch: %d | Test acc %.3f", epoch, test_acc))
+
+          train_data.reset
+          test_data.reset
+        end
       end
     end
   end

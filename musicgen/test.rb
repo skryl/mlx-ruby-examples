@@ -5,7 +5,7 @@ require "tmpdir"
 
 require_relative "musicgen"
 require_relative "utils"
-
+require_relative "../benchmark/parity"
 if $PROGRAM_NAME == __FILE__
   options = { seed: 123 }
 
@@ -14,6 +14,11 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--seed N", Integer, "PRNG seed") { |v| options[:seed] = v }
   end
   parser.parse!
+  benchmark_enabled = ENV["MLX_BENCHMARK"] == "1"
+  if benchmark_enabled
+    BenchmarkParity.prime_backend!
+    benchmark_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   MLX::Core.random_seed(options[:seed])
 
@@ -52,6 +57,24 @@ if $PROGRAM_NAME == __FILE__
   expected_shape = [1, 3, config.audio_encoder.codebook_size, config.decoder.num_codebooks]
   unless logits.shape == expected_shape
     raise "Forward shape mismatch: expected #{expected_shape.inspect}, got #{logits.shape.inspect}"
+  end
+
+  if benchmark_enabled
+    if ENV["MLX_BENCHMARK_DRYRUN"] == "1"
+      exit 0
+    end
+    benchmark_parity_started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    BenchmarkParity.validate!(
+      model_id: "musicgen",
+      inputs: { audio_tokens: audio_tokens, conditioning: conditioning },
+      outputs: { logits: logits },
+      python_bin: ENV.fetch("PYTHON_BIN", "python3")
+    )
+    benchmark_parity_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_parity_started_at
+    benchmark_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - benchmark_started_at - benchmark_parity_elapsed
+    puts format("BENCHMARK_SECONDS=%.9f", benchmark_elapsed)
+    puts "Tests pass :)"
+    exit 0
   end
 
   head_dim = config.decoder.hidden_size / config.decoder.num_attention_heads

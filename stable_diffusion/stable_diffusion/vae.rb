@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-dsl_lib = File.join(File.expand_path("../..", __dir__), "codex-dsl", "lib")
-$LOAD_PATH.unshift(dsl_lib) unless $LOAD_PATH.include?(dsl_lib)
 
 require "mlx"
 
@@ -23,10 +21,8 @@ module StableDiffusionExample
   end
 
   def downsample_stride(x, stride: 8)
-    h_idx = (0...x.shape[1]).step(stride).to_a
-    w_idx = (0...x.shape[2]).step(stride).to_a
-    h_idx = MLX::Core.array(h_idx, MLX::Core.int32)
-    w_idx = MLX::Core.array(w_idx, MLX::Core.int32)
+    h_idx = MLX::Core.arange(0, x.shape[1], stride, MLX::Core.int32)
+    w_idx = MLX::Core.arange(0, x.shape[2], stride, MLX::Core.int32)
     y = MLX::Core.take(x, h_idx, 1)
     MLX::Core.take(y, w_idx, 2)
   end

@@ -54,6 +54,11 @@ ruby cvae/main.rb \
 
 Saved reconstructions/samples are written as `.pgm` images by default. Use `--no-save-images` to disable export.
 
+## DSL Notes
+
+- Training in `main.rb` is orchestrated with `MLX::DSL::Trainer` hooks.
+- Checkpoint lifecycle is managed with DSL artifact policy under `cvae/models/checkpoints/`.
+
 ## Test
 
 ```bash
