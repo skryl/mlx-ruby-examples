@@ -1,5 +1,7 @@
 # MLX Ruby Examples
 
+[![CI](https://github.com/skryl/mlx-ruby-examples/actions/workflows/ci.yml/badge.svg)](https://github.com/skryl/mlx-ruby-examples/actions/workflows/ci.yml)
+
 Ruby/MLX example ports that depend on Apple Metal when building the `mlx` gem.
 
 ## Prerequisites (macOS)

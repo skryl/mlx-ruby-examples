@@ -153,11 +153,11 @@ module TransformerLmExample
       end
 
       trainer.before_epoch do |ctx|
-        it = ctx.fetch(:epoch).to_i
+        iter = ctx.fetch(:epoch).to_i
         warmup = if options[:lr_warmup] <= 0
           1.0
         else
-          [1.0, it.to_f / options[:lr_warmup].to_f].min
+          [1.0, iter.to_f / options[:lr_warmup].to_f].min
         end
         optimizer.learning_rate = warmup * options[:learning_rate]
       end
@@ -165,15 +165,15 @@ module TransformerLmExample
       losses = []
       tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       trainer.after_epoch do |ctx|
-        it = ctx.fetch(:epoch).to_i + 1
+        iter = ctx.fetch(:epoch).to_i + 1
         losses << ctx.fetch(:epoch_loss).to_f
 
-        if (it % options[:steps_per_report]).zero?
+        if (iter % options[:steps_per_report]).zero?
           toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           train_loss = losses.sum / [losses.length, 1].max.to_f
           puts format(
             "Iter %d: Train loss %.3f, It/sec %.3f",
-            it,
+            iter,
             train_loss,
             options[:steps_per_report] / [toc - tic, 1e-9].max
           )
@@ -181,7 +181,7 @@ module TransformerLmExample
           tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
 
-        next unless (it % options[:steps_per_eval]).zero?
+        next unless (iter % options[:steps_per_eval]).zero?
 
         eval_tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         val_loss = eval_fn(
@@ -194,7 +194,7 @@ module TransformerLmExample
         val_ppl = Math.exp(val_loss)
         puts format(
           "Iter %d: Val loss %.3f, Val ppl %.3f, Val took %.3fs",
-          it,
+          iter,
           val_loss,
           val_ppl,
           eval_toc - eval_tic

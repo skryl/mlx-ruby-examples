@@ -74,19 +74,19 @@ module NormalizingFlowExample
       rng = Random.new(options[:seed] + 1)
       all_indices = (0...x.shape[0]).to_a
       tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      options[:n_steps].times do |it|
+      options[:n_steps].times do |iter|
         ids = all_indices.sample(options[:n_batch], random: rng)
         batch = MLX::Core.take(x, MLX::Core.array(ids, MLX::Core.int32), 0)
         loss, grads = loss_and_grad_fn.call(batch)
         optimizer.update(model, grads)
         MLX::Core.eval(loss, model.parameters, optimizer.state)
 
-        next unless ((it + 1) % options[:report_every]).zero?
+        next unless ((iter + 1) % options[:report_every]).zero?
 
         toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         puts format(
           "Step %d: Loss %.4f | It/sec %.2f",
-          it + 1,
+          iter + 1,
           loss.item.to_f,
           options[:report_every] / [toc - tic, 1e-9].max
         )
