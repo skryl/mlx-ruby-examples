@@ -146,11 +146,11 @@ module TransformerLmExample
 
       losses = []
       tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      options[:num_iters].times do |it|
+      options[:num_iters].times do |iter|
         warmup = if options[:lr_warmup] <= 0
           1.0
         else
-          [1.0, it.to_f / options[:lr_warmup].to_f].min
+          [1.0, iter.to_f / options[:lr_warmup].to_f].min
         end
         optimizer.learning_rate = warmup * options[:learning_rate]
 
@@ -160,12 +160,12 @@ module TransformerLmExample
         MLX::Core.eval(loss, model.parameters, optimizer.state)
         losses << loss.item.to_f
 
-        if ((it + 1) % options[:steps_per_report]).zero?
+        if ((iter + 1) % options[:steps_per_report]).zero?
           toc = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           train_loss = losses.sum / [losses.length, 1].max.to_f
           puts format(
             "Iter %d: Train loss %.3f, It/sec %.3f",
-            it + 1,
+            iter + 1,
             train_loss,
             options[:steps_per_report] / [toc - tic, 1e-9].max
           )
@@ -173,7 +173,7 @@ module TransformerLmExample
           tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
 
-        next unless ((it + 1) % options[:steps_per_eval]).zero?
+        next unless ((iter + 1) % options[:steps_per_eval]).zero?
 
         eval_tic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         val_loss = eval_fn(
@@ -186,7 +186,7 @@ module TransformerLmExample
         val_ppl = Math.exp(val_loss)
         puts format(
           "Iter %d: Val loss %.3f, Val ppl %.3f, Val took %.3fs",
-          it + 1,
+          iter + 1,
           val_loss,
           val_ppl,
           eval_toc - eval_tic

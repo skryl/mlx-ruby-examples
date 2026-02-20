@@ -155,7 +155,7 @@ module LoraExample
         seed: options[:seed]
       )
 
-      options[:iters].times do |it|
+      options[:iters].times do |iter|
         inputs, targets, lengths = batches.next
         (lvalue, toks), grad = loss_value_and_grad.call(inputs, targets, lengths)
         optimizer.update(model, grad)
@@ -164,12 +164,12 @@ module LoraExample
         losses << lvalue.item.to_f
         n_tokens += toks.item.to_f
 
-        if ((it + 1) % options[:steps_per_report]).zero?
+        if ((iter + 1) % options[:steps_per_report]).zero?
           stop = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           train_loss = losses.sum / [losses.length, 1].max.to_f
           puts format(
             "Iter %d: Train loss %.3f, It/sec %.3f, Tokens/sec %.3f",
-            it + 1,
+            iter + 1,
             train_loss,
             options[:steps_per_report] / [stop - start, 1e-9].max,
             n_tokens / [stop - start, 1e-9].max
@@ -179,7 +179,7 @@ module LoraExample
           start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
 
-        if it.zero? || ((it + 1) % options[:steps_per_eval]).zero?
+        if iter.zero? || ((iter + 1) % options[:steps_per_eval]).zero?
           eval_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           val_loss = evaluate(
             model,
@@ -191,16 +191,16 @@ module LoraExample
           )
           puts format(
             "Iter %d: Val loss %.3f, Val took %.3fs",
-            it + 1,
+            iter + 1,
             val_loss,
             Process.clock_gettime(Process::CLOCK_MONOTONIC) - eval_start
           )
           start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
 
-        if ((it + 1) % options[:save_every]).zero?
+        if ((iter + 1) % options[:save_every]).zero?
           save_trainable_adapters(options[:adapter_file], model)
-          puts "Iter #{it + 1}: Saved adapter weights to #{options[:adapter_file]}."
+          puts "Iter #{iter + 1}: Saved adapter weights to #{options[:adapter_file]}."
         end
       end
     end
